@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "armoriq-api"
+version = "0.1.0"
+description = "Guarded MCP agent control plane for the ArmorIQ assignment."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "aiosqlite>=0.21.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.28.0",
+  "mcp>=1.28.0",
+  "pydantic-settings>=2.10.0",
+  "redis>=6.2.0",
+  "sqlalchemy>=2.0.36",
+  "sse-starlette>=3.0.0",
+  "uvicorn>=0.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.0.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

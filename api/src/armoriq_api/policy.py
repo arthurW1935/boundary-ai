@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
+
+from armoriq_api.models import Policy
+from armoriq_api.types import PolicyDecision, ToolExecutionIntent
+
+
+VERDICT_WEIGHT = {
+    "allow": 0,
+    "require_approval": 1,
+    "block": 2,
+}
+
+
+@dataclass(slots=True)
+class EvaluatedRule:
+    policy_id: str
+    verdict: str
+    reason: str
+    specificity: int
+    priority: int
+
+
+class PolicyEngine:
+    def evaluate(self, intent: ToolExecutionIntent, policies: Iterable[Policy]) -> PolicyDecision:
+        evaluated: list[EvaluatedRule] = []
+
+        if intent.token_budget is not None and intent.spent_tokens >= intent.token_budget:
+            evaluated.append(
+                EvaluatedRule(
+                    policy_id="conversation-token-budget",
+                    verdict="block",
+                    reason="Conversation token budget exceeded.",
+                    specificity=3,
+                    priority=10_000,
+                )
+            )
+        if intent.cost_budget is not None and intent.spent_cost >= intent.cost_budget:
+            evaluated.append(
+                EvaluatedRule(
+                    policy_id="conversation-cost-budget",
+                    verdict="block",
+                    reason="Conversation cost budget exceeded.",
+                    specificity=3,
+                    priority=10_000,
+                )
+            )
+
+        for policy in policies:
+            if not policy.enabled or not self._matches_scope(policy, intent):
+                continue
+
+            if policy.rule_type == "block_tool":
+                evaluated.append(
+                    EvaluatedRule(
+                        policy_id=policy.id,
+                        verdict="block",
+                        reason=(policy.action_json or {}).get("reason", "Blocked by policy."),
+                        specificity=self._specificity(policy),
+                        priority=policy.priority,
+                    )
+                )
+                continue
+
+            if policy.rule_type == "require_approval":
+                evaluated.append(
+                    EvaluatedRule(
+                        policy_id=policy.id,
+                        verdict="require_approval",
+                        reason=(policy.action_json or {}).get("reason", "Tool requires human approval."),
+                        specificity=self._specificity(policy),
+                        priority=policy.priority,
+                    )
+                )
+                continue
+
+            if policy.rule_type == "validate_args":
+                valid, reason = self._validate_args(policy.conditions_json or {}, intent.arguments)
+                if not valid:
+                    evaluated.append(
+                        EvaluatedRule(
+                            policy_id=policy.id,
+                            verdict="block",
+                            reason=reason,
+                            specificity=self._specificity(policy),
+                            priority=policy.priority,
+                        )
+                    )
+                continue
+
+            if policy.rule_type == "token_budget":
+                budget = (policy.conditions_json or {}).get("max_tokens")
+                if budget is not None and intent.spent_tokens >= int(budget):
+                    evaluated.append(
+                        EvaluatedRule(
+                            policy_id=policy.id,
+                            verdict="block",
+                            reason=f"Policy token budget exceeded ({budget}).",
+                            specificity=self._specificity(policy),
+                            priority=policy.priority,
+                        )
+                    )
+                continue
+
+            if policy.rule_type == "cost_budget":
+                budget = (policy.conditions_json or {}).get("max_cost")
+                if budget is not None and intent.spent_cost >= float(budget):
+                    evaluated.append(
+                        EvaluatedRule(
+                            policy_id=policy.id,
+                            verdict="block",
+                            reason=f"Policy cost budget exceeded ({budget}).",
+                            specificity=self._specificity(policy),
+                            priority=policy.priority,
+                        )
+                    )
+
+        if not evaluated:
+            return PolicyDecision(verdict="allow", reason="No matching policy blocked the call.", matched_rule_ids=[])
+
+        winner = max(evaluated, key=lambda item: (VERDICT_WEIGHT[item.verdict], item.specificity, item.priority))
+        return PolicyDecision(
+            verdict=winner.verdict,
+            reason=winner.reason,
+            matched_rule_ids=[winner.policy_id],
+            requires_approval=winner.verdict == "require_approval",
+        )
+
+    def _matches_scope(self, policy: Policy, intent: ToolExecutionIntent) -> bool:
+        if policy.target_tool and policy.target_tool != intent.tool_name:
+            return False
+        if policy.target_server_id and policy.target_server_id != intent.server_id:
+            return False
+        return True
+
+    def _specificity(self, policy: Policy) -> int:
+        score = 0
+        if policy.target_server_id:
+            score += 1
+        if policy.target_tool:
+            score += 1
+        return score
+
+    def _validate_args(self, conditions: dict[str, Any], arguments: dict[str, Any]) -> tuple[bool, str]:
+        path_arg = conditions.get("path_arg")
+        if path_arg:
+            path_value = str(arguments.get(path_arg, ""))
+            for prefix in conditions.get("allow_prefixes", []):
+                if path_value.startswith(prefix):
+                    return True, "Path prefix allowed."
+            return False, f"Argument '{path_arg}' must start with one of {conditions.get('allow_prefixes', [])}."
+
+        blocked_args = conditions.get("blocked_values", {})
+        for arg_name, blocked_values in blocked_args.items():
+            if arguments.get(arg_name) in blocked_values:
+                return False, f"Argument '{arg_name}' contains a blocked value."
+
+        return True, "Arguments validated."
