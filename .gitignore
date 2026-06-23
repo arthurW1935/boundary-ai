@@ -23,3 +23,6 @@ mcp_server/.venv/
 web/.turbo/
 tmp/
 logs/
+mcp_server/sandbox/*
+!mcp_server/sandbox/.gitkeep
+*.egg-info/

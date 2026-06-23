@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "armoriq-mcp-server"
+version = "0.1.0"
+description = "Custom sandboxed file MCP server for the ArmorIQ assignment."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
