@@ -8,12 +8,25 @@ import { useLiveRefresh } from "@/lib/use-live-refresh";
 
 const DEFAULT_CONFIG = "{\n  \"url\": \"https://example.com/mcp\"\n}";
 
+function statusClass(status: string) {
+  if (status === "connected") {
+    return "success";
+  }
+  if (status === "auth_error" || status === "discovery_failed" || status === "execution_failed") {
+    return "danger";
+  }
+  if (status === "pending") {
+    return "warning";
+  }
+  return "";
+}
+
 export default function MCPServersPage() {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [tools, setTools] = useState<MCPTool[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [name, setName] = useState("");
-  const [transport, setTransport] = useState("sse");
+  const [transport, setTransport] = useState("streamable_http");
   const [config, setConfig] = useState(DEFAULT_CONFIG);
 
   async function loadAll() {
@@ -46,12 +59,12 @@ export default function MCPServersPage() {
         })
       });
       setName("");
-      setTransport("sse");
+      setTransport("streamable_http");
       setConfig(DEFAULT_CONFIG);
       setStatus("Server registered.");
       await loadAll();
     } catch (error) {
-      setStatus(String(error));
+      setStatus(`Server config is invalid or request failed: ${String(error)}`);
     }
   }
 
@@ -83,8 +96,8 @@ export default function MCPServersPage() {
         <div>
           <h2>MCP Servers</h2>
           <p>
-            Register local or remote MCP endpoints here. Tool discovery is live and the agent uses
-            whatever each active server exposes.
+            The assignment requires two MCP servers. This workspace now expects both the local
+            sandbox server and Exa&apos;s remote hosted MCP to be connected and discoverable.
           </p>
         </div>
         <span className="badge">{status ?? `${tools.length} discovered tools`}</span>
@@ -101,8 +114,8 @@ export default function MCPServersPage() {
             <div className="field">
               <label>Transport</label>
               <select value={transport} onChange={(event) => setTransport(event.target.value)}>
-                <option value="sse">sse</option>
                 <option value="streamable_http">streamable_http</option>
+                <option value="sse">sse</option>
                 <option value="stdio">stdio</option>
               </select>
             </div>
@@ -126,18 +139,16 @@ export default function MCPServersPage() {
               <div className="card" key={server.id}>
                 <div className="row wrap" style={{ justifyContent: "space-between" }}>
                   <strong>{server.name}</strong>
-                  <span className={`badge ${server.enabled ? "success" : "danger"}`}>
-                    {server.enabled ? "enabled" : "disabled"}
-                  </span>
+                  <span className={`badge ${statusClass(server.status)}`}>{server.status}</span>
                 </div>
                 <p className="muted">
-                  {server.transport} · {server.tool_count} tools
+                  {server.transport} / {server.tool_count} tools / {server.enabled ? "enabled" : "disabled"}
                 </p>
                 {server.last_error && <p style={{ color: "var(--danger)" }}>{server.last_error}</p>}
                 <pre>{JSON.stringify(server.config, null, 2)}</pre>
                 <div className="row wrap" style={{ marginTop: 12 }}>
                   <button className="button secondary" onClick={() => refreshServer(server.id)}>
-                    Refresh Tools
+                    Refresh tools
                   </button>
                   <button className="button secondary" onClick={() => toggleServer(server)}>
                     {server.enabled ? "Disable" : "Enable"}

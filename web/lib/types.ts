@@ -6,6 +6,11 @@ export type Conversation = {
   spent_tokens: number;
   spent_cost: number;
   created_at: string;
+  updated_at: string;
+  latest_run_status: string;
+  pending_approval: boolean;
+  pending_approval_reason: string | null;
+  latest_message_preview: string;
 };
 
 export type Message = {
@@ -26,6 +31,13 @@ export type ChatResponse = {
     tool_name: string;
     arguments: Record<string, unknown>;
   } | null;
+  executed_tool_calls: {
+    server_id: string;
+    tool_name: string;
+    arguments: Record<string, unknown>;
+    result: Record<string, unknown>;
+    is_error: boolean;
+  }[];
   approval_request_id?: string | null;
 };
 
@@ -74,6 +86,7 @@ export type MCPServer = {
   last_error: string | null;
   last_discovered_at: string | null;
   tool_count: number;
+  status: string;
 };
 
 export type MCPTool = {

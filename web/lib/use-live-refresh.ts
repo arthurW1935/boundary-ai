@@ -17,6 +17,7 @@ export function useLiveRefresh(onEvent: () => void) {
       "chat.user_message",
       "agent.response",
       "agent.planner_error",
+      "agent.max_steps_reached",
       "mcp.tools_discovered",
       "mcp.tool_succeeded",
       "mcp.tool_failed",

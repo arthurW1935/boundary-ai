@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { apiGet, apiSend } from "@/lib/api";
 import { useLiveRefresh } from "@/lib/use-live-refresh";
@@ -13,6 +13,10 @@ export default function ChatPage() {
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
+
+  const selectedConversation =
+    conversations.find((conversation) => conversation.id === selectedConversationId) ?? null;
 
   async function loadConversations() {
     const data = await apiGet<Conversation[]>("/api/conversations");
@@ -27,6 +31,17 @@ export default function ChatPage() {
     setMessages(data);
   }
 
+  async function createConversation() {
+    const response = await apiSend<{ id: string }>("/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ title: "New conversation" })
+    });
+    await loadConversations();
+    setSelectedConversationId(response.id);
+    setMessages([]);
+    setDraft("");
+  }
+
   useEffect(() => {
     loadConversations().catch((error) => setStatus(String(error)));
   }, []);
@@ -39,6 +54,12 @@ export default function ChatPage() {
     }
   }, [selectedConversationId]);
 
+  useEffect(() => {
+    if (transcriptRef.current) {
+      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
+    }
+  }, [messages, selectedConversationId]);
+
   useLiveRefresh(() => {
     loadConversations().catch(() => undefined);
     if (selectedConversationId) {
@@ -48,7 +69,7 @@ export default function ChatPage() {
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if (!draft.trim()) {
+    if (!draft.trim() || busy || selectedConversation?.pending_approval) {
       return;
     }
 
@@ -80,87 +101,120 @@ export default function ChatPage() {
         <div>
           <h2>Agent Chat</h2>
           <p>
-            Run prompts through the guarded agent. Tool calls are discovered from MCP servers,
-            filtered by policy, and surfaced here with approval-aware statuses.
+            Run the guarded agent through a conversation-first workspace. Each thread keeps its own
+            MCP activity, policy state, approvals, and audit trail.
           </p>
         </div>
         <span className="badge warning">{status ?? "Ready"}</span>
       </header>
 
-      <div className="chat-layout">
-        <section className="panel stack">
-          <div className="row wrap" style={{ justifyContent: "space-between" }}>
-            <h3>Conversations</h3>
-            <button className="button secondary" onClick={() => loadConversations()}>
-              Refresh
+      <div className="chat-shell">
+        <aside className="chat-sidebar panel">
+          <div className="chat-sidebar-header">
+            <div>
+              <h3>Conversations</h3>
+              <p className="muted">Keep separate guarded runs by task.</p>
+            </div>
+            <button className="button" onClick={() => createConversation()}>
+              New chat
             </button>
           </div>
 
-          <div className="list">
+          <div className="chat-conversation-list">
             {conversations.map((conversation) => (
               <button
                 key={conversation.id}
-                className="card"
-                style={{
-                  textAlign: "left",
-                  borderColor:
-                    selectedConversationId === conversation.id
-                      ? "rgba(245, 158, 11, 0.28)"
-                      : undefined
-                }}
+                className={`conversation-item${
+                  selectedConversationId === conversation.id ? " active" : ""
+                }`}
                 onClick={() => setSelectedConversationId(conversation.id)}
               >
-                <div className="row wrap" style={{ justifyContent: "space-between" }}>
+                <div className="conversation-item-top">
                   <strong>{conversation.title}</strong>
-                  <span className="badge">
-                    {conversation.spent_tokens} tokens / ${conversation.spent_cost.toFixed(2)}
+                  <span
+                    className={`badge ${
+                      conversation.latest_run_status === "waiting_approval"
+                        ? "warning"
+                        : conversation.latest_run_status === "blocked" ||
+                            conversation.latest_run_status === "failed"
+                          ? "danger"
+                          : "success"
+                    }`}
+                  >
+                    {conversation.pending_approval ? "approval" : conversation.latest_run_status}
                   </span>
                 </div>
-                <p className="muted mono">{conversation.id}</p>
+                <p className="muted conversation-preview">
+                  {conversation.latest_message_preview || "No messages yet."}
+                </p>
               </button>
             ))}
           </div>
-        </section>
+        </aside>
 
-        <section className="panel stack">
-          <div className="row wrap" style={{ justifyContent: "space-between" }}>
-            <h3>Transcript</h3>
-            <span className="badge">{selectedConversationId ?? "new conversation"}</span>
+        <section className="panel chat-main">
+          <div className="chat-main-header">
+            <div>
+              <h3>{selectedConversation?.title ?? "New conversation"}</h3>
+              <p className="muted">
+                {selectedConversation
+                  ? `${selectedConversation.spent_tokens} tokens / $${selectedConversation.spent_cost.toFixed(2)}`
+                  : "Start a new guarded run."}
+              </p>
+            </div>
+            <span className="badge">{selectedConversation?.latest_run_status ?? "idle"}</span>
           </div>
 
-          <div className="messages">
+          {selectedConversation?.pending_approval && (
+            <div className="approval-banner">
+              <strong>Waiting for approval.</strong>
+              <span>{selectedConversation.pending_approval_reason}</span>
+            </div>
+          )}
+
+          <div className="chat-transcript" ref={transcriptRef}>
             {messages.length === 0 && (
-              <div className="message">
-                No messages yet. Try `list files`, `write file notes/demo.txt: hello`, or
-                `delete file notes/demo.txt`.
+              <div className="empty-chat">
+                <p>Try a simple safe action first.</p>
+                <pre>{`list files\nwrite file notes/demo.txt: hello\nsearch files for guarded`}</pre>
               </div>
             )}
 
             {messages.map((message) => (
-              <div key={message.id} className={`message ${message.role}`}>
-                <strong>{message.role}</strong>
-                <p>{message.content}</p>
-              </div>
+              <article key={message.id} className={`chat-bubble ${message.role}`}>
+                <header>
+                  <span>{message.role}</span>
+                </header>
+                <div>
+                  <p>{message.content}</p>
+                </div>
+              </article>
             ))}
           </div>
 
-          <form className="stack" onSubmit={handleSubmit}>
-            <div className="field">
-              <label htmlFor="chat-input">Prompt</label>
-              <textarea
-                id="chat-input"
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                placeholder="Ask the agent to use a tool..."
-              />
-            </div>
-            <div className="row wrap">
-              <button className="button" disabled={busy}>
+          <form className="chat-composer" onSubmit={handleSubmit}>
+            <textarea
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder={
+                selectedConversation?.pending_approval
+                  ? "This conversation is waiting for approval."
+                  : "Ask the agent to use MCP tools..."
+              }
+              disabled={busy || selectedConversation?.pending_approval}
+            />
+            <div className="chat-composer-footer">
+              <span className="muted">
+                {selectedConversation?.pending_approval
+                  ? "Approve or deny the pending tool call to continue this thread."
+                  : "Multi-step runs can chain local and remote MCP tools in one conversation."}
+              </span>
+              <button
+                className="button"
+                disabled={busy || selectedConversation?.pending_approval || !draft.trim()}
+              >
                 {busy ? "Running..." : "Send"}
               </button>
-              <span className="muted">
-                Sensitive tools will pause here if approval is required.
-              </span>
             </div>
           </form>
         </section>
