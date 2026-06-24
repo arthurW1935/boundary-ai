@@ -51,3 +51,10 @@ class PolicyDecision:
     matched_rule_ids: list[str]
     requires_approval: bool = False
     created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass(slots=True)
+class ExecutedToolStep:
+    tool_call: ToolCall
+    result: dict[str, Any]
+    is_error: bool = False

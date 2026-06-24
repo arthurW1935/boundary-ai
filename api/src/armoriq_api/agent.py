@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,7 +15,7 @@ from armoriq_api.mcp_manager import MCPManager
 from armoriq_api.models import ApprovalRequest, Conversation, MCPServer, Message, Policy, Run
 from armoriq_api.policy import PolicyEngine
 from armoriq_api.schemas import ChatResponse
-from armoriq_api.types import ToolCall, ToolExecutionIntent
+from armoriq_api.types import ExecutedToolStep, ToolCall, ToolExecutionIntent
 
 
 class AgentRuntime:
@@ -33,7 +34,27 @@ class AgentRuntime:
         self.audit_logger = audit_logger
 
     async def handle_chat(self, session: AsyncSession, user_message: str, conversation_id: str | None) -> ChatResponse:
-        conversation = await self._get_or_create_conversation(session, conversation_id)
+        conversation = await self._get_or_create_conversation(session, conversation_id, user_message)
+        pending_approval = None
+        if conversation_id:
+            pending_approval = await session.scalar(
+                select(ApprovalRequest)
+                .where(
+                    ApprovalRequest.conversation_id == conversation.id,
+                    ApprovalRequest.status == "pending",
+                )
+                .order_by(ApprovalRequest.created_at.desc())
+                .limit(1)
+            )
+        if pending_approval is not None:
+            return ChatResponse(
+                conversation_id=conversation.id,
+                run_id=pending_approval.run_id,
+                status="waiting_approval",
+                assistant_message=f"Conversation is waiting for approval: {pending_approval.reason}",
+                approval_request_id=pending_approval.id,
+            )
+
         run = Run(conversation_id=conversation.id, status="running")
         session.add(run)
         session.add(Message(conversation_id=conversation.id, role="user", content=user_message))
@@ -47,7 +68,7 @@ class AgentRuntime:
             run_id=run.id,
         )
 
-        tools = await self.mcp_manager.list_tools(session, refresh=True)
+        tools = await self.mcp_manager.list_tools(session, refresh=False)
         await self.audit_logger.record(
             session,
             "mcp.tools_discovered",
@@ -56,52 +77,9 @@ class AgentRuntime:
             run_id=run.id,
         )
 
-        try:
-            plan = await self.planner.plan(user_message, tools)
-        except Exception as exc:  # noqa: BLE001
-            run.status = "failed"
-            run.latest_response = str(exc)
-            await self.audit_logger.record(
-                session,
-                "agent.planner_error",
-                {"error": str(exc)},
-                conversation_id=conversation.id,
-                run_id=run.id,
-            )
-            await session.commit()
-            return ChatResponse(
-                conversation_id=conversation.id,
-                run_id=run.id,
-                status="failed",
-                assistant_message=f"Planner error: {exc}",
-            )
-
-        conversation.spent_tokens += plan.usage_tokens
-        conversation.spent_cost += plan.usage_cost
-
-        if plan.tool_call is None:
-            assistant_message = plan.assistant_message or "No tool call was required."
-            session.add(Message(conversation_id=conversation.id, role="assistant", content=assistant_message))
-            run.status = "completed"
-            run.latest_response = assistant_message
-            await self.audit_logger.record(
-                session,
-                "agent.response",
-                {"message": assistant_message},
-                conversation_id=conversation.id,
-                run_id=run.id,
-            )
-            await session.commit()
-            return ChatResponse(
-                conversation_id=conversation.id,
-                run_id=run.id,
-                status="completed",
-                assistant_message=assistant_message,
-            )
-
-        tool_response = await self._execute_tool_call(session, conversation, run, user_message, plan.tool_call)
+        response = await self._run_planner_loop(session, conversation, run, user_message, tools, [])
         await session.commit()
-        return tool_response
+        return response
 
     async def decide_approval(
         self,
@@ -167,19 +145,131 @@ class AgentRuntime:
             )
 
         run.status = "running"
-        tool_call = ToolCall(server_id=approval.server_id, tool_name=approval.tool_name, arguments=approval.arguments_json)
-        response = await self._run_allowed_tool(session, conversation, run, "approved tool execution", tool_call)
+        stored_context = self._extract_approval_context(approval.arguments_json)
+        executed_steps = [self._executed_step_from_dict(item) for item in stored_context["executed_steps"]]
+        tool_call = ToolCall(
+            server_id=approval.server_id,
+            tool_name=approval.tool_name,
+            arguments=stored_context["tool_arguments"],
+        )
+        tools = await self.mcp_manager.list_tools(session, refresh=False)
+        step_result = await self._execute_allowed_tool_step(
+            session,
+            conversation,
+            run,
+            tool_call,
+            executed_steps,
+        )
+        if isinstance(step_result, ChatResponse):
+            await session.commit()
+            return step_result
+
+        executed_steps.append(step_result)
+        response = await self._run_planner_loop(
+            session,
+            conversation,
+            run,
+            stored_context["user_message"],
+            tools,
+            executed_steps,
+        )
         await session.commit()
         return response
 
-    async def _execute_tool_call(
+    async def _run_planner_loop(
+        self,
+        session: AsyncSession,
+        conversation: Conversation,
+        run: Run,
+        user_message: str,
+        tools: list,
+        executed_steps: list[ExecutedToolStep],
+    ) -> ChatResponse:
+        for _ in range(self.settings.max_tool_steps):
+            try:
+                plan = await self.planner.plan(user_message, tools, executed_steps)
+            except Exception as exc:  # noqa: BLE001
+                run.status = "failed"
+                run.latest_response = str(exc)
+                await self.audit_logger.record(
+                    session,
+                    "agent.planner_error",
+                    {"error": str(exc)},
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                )
+                return ChatResponse(
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                    status="failed",
+                    assistant_message=f"Planner error: {exc}",
+                    executed_tool_calls=self._serialize_steps(executed_steps),
+                )
+
+            conversation.spent_tokens += plan.usage_tokens
+            conversation.spent_cost += plan.usage_cost
+
+            if plan.tool_call is None:
+                assistant_message = plan.assistant_message or self._fallback_summary(executed_steps)
+                session.add(Message(conversation_id=conversation.id, role="assistant", content=assistant_message))
+                run.status = "completed"
+                run.paused_reason = None
+                run.latest_response = assistant_message
+                await self.audit_logger.record(
+                    session,
+                    "agent.response",
+                    {"message": assistant_message},
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                )
+                return ChatResponse(
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                    status="completed",
+                    assistant_message=assistant_message,
+                    executed_tool_calls=self._serialize_steps(executed_steps),
+                )
+
+            tool_response = await self._evaluate_tool_call(
+                session,
+                conversation,
+                run,
+                user_message,
+                plan.tool_call,
+                executed_steps,
+            )
+            if isinstance(tool_response, ChatResponse):
+                return tool_response
+            executed_steps.append(tool_response)
+
+        assistant_message = "Stopped after reaching the maximum number of tool steps for this run."
+        session.add(Message(conversation_id=conversation.id, role="assistant", content=assistant_message))
+        run.status = "failed"
+        run.latest_response = assistant_message
+        await self.audit_logger.record(
+            session,
+            "agent.max_steps_reached",
+            {"max_tool_steps": self.settings.max_tool_steps},
+            conversation_id=conversation.id,
+            run_id=run.id,
+        )
+        return ChatResponse(
+            conversation_id=conversation.id,
+            run_id=run.id,
+            status="failed",
+            assistant_message=assistant_message,
+            executed_tool_calls=self._serialize_steps(executed_steps),
+        )
+
+    async def _evaluate_tool_call(
         self,
         session: AsyncSession,
         conversation: Conversation,
         run: Run,
         user_message: str,
         tool_call: ToolCall,
-    ) -> ChatResponse:
+        executed_steps: list[ExecutedToolStep],
+    ) -> ChatResponse | ExecutedToolStep:
         server = await session.get(MCPServer, tool_call.server_id)
         if server is None:
             run.status = "failed"
@@ -189,6 +279,7 @@ class AgentRuntime:
                 run_id=run.id,
                 status="failed",
                 assistant_message=run.latest_response,
+                executed_tool_calls=self._serialize_steps(executed_steps),
             )
 
         intent = ToolExecutionIntent(
@@ -230,7 +321,8 @@ class AgentRuntime:
                 run_id=run.id,
                 status="blocked",
                 assistant_message=assistant_message,
-                tool_call={"server_id": tool_call.server_id, "tool_name": tool_call.tool_name, "arguments": tool_call.arguments},
+                tool_call=self._serialize_tool_call(tool_call),
+                executed_tool_calls=self._serialize_steps(executed_steps),
             )
 
         if decision.verdict == "require_approval":
@@ -239,7 +331,7 @@ class AgentRuntime:
                 conversation_id=conversation.id,
                 server_id=tool_call.server_id,
                 tool_name=tool_call.tool_name,
-                arguments_json=tool_call.arguments,
+                arguments_json=self._build_approval_context(tool_call, user_message, executed_steps),
                 status="pending",
                 reason=decision.reason,
                 expires_at=datetime.utcnow() + timedelta(seconds=self.settings.approval_ttl_seconds),
@@ -266,20 +358,21 @@ class AgentRuntime:
                 run_id=run.id,
                 status="waiting_approval",
                 assistant_message=assistant_message,
-                tool_call={"server_id": tool_call.server_id, "tool_name": tool_call.tool_name, "arguments": tool_call.arguments},
+                tool_call=self._serialize_tool_call(tool_call),
+                executed_tool_calls=self._serialize_steps(executed_steps),
                 approval_request_id=approval.id,
             )
 
-        return await self._run_allowed_tool(session, conversation, run, user_message, tool_call)
+        return await self._execute_allowed_tool_step(session, conversation, run, tool_call, executed_steps)
 
-    async def _run_allowed_tool(
+    async def _execute_allowed_tool_step(
         self,
         session: AsyncSession,
         conversation: Conversation,
         run: Run,
-        user_message: str,
         tool_call: ToolCall,
-    ) -> ChatResponse:
+        executed_steps: list[ExecutedToolStep],
+    ) -> ChatResponse | ExecutedToolStep:
         try:
             tool_result = await self.mcp_manager.call_tool(session, tool_call.server_id, tool_call.tool_name, tool_call.arguments)
         except Exception as exc:  # noqa: BLE001
@@ -298,14 +391,15 @@ class AgentRuntime:
                 run_id=run.id,
                 status="failed",
                 assistant_message=run.latest_response,
-                tool_call={"server_id": tool_call.server_id, "tool_name": tool_call.tool_name, "arguments": tool_call.arguments},
+                tool_call=self._serialize_tool_call(tool_call),
+                executed_tool_calls=self._serialize_steps(executed_steps),
             )
 
         session.add(
             Message(
                 conversation_id=conversation.id,
                 role="tool",
-                content=str(tool_result),
+                content=json.dumps(tool_result, indent=2),
                 metadata_json={"tool_name": tool_call.tool_name, "server_id": tool_call.server_id},
             )
         )
@@ -316,36 +410,79 @@ class AgentRuntime:
             conversation_id=conversation.id,
             run_id=run.id,
         )
-
-        summary = await self.planner.summarize_tool_result(user_message, tool_call, tool_result)
-        conversation.spent_tokens += summary.usage_tokens
-        conversation.spent_cost += summary.usage_cost
-        assistant_message = summary.assistant_message or "Tool execution completed."
-        session.add(Message(conversation_id=conversation.id, role="assistant", content=assistant_message))
-        run.status = "completed"
-        run.paused_reason = None
-        run.latest_response = assistant_message
-        await self.audit_logger.record(
-            session,
-            "agent.response",
-            {"message": assistant_message},
-            conversation_id=conversation.id,
-            run_id=run.id,
-        )
-        return ChatResponse(
-            conversation_id=conversation.id,
-            run_id=run.id,
-            status="completed",
-            assistant_message=assistant_message,
-            tool_call={"server_id": tool_call.server_id, "tool_name": tool_call.tool_name, "arguments": tool_call.arguments},
+        return ExecutedToolStep(
+            tool_call=tool_call,
+            result=tool_result,
+            is_error=bool(tool_result.get("raw", {}).get("isError")) if isinstance(tool_result, dict) else False,
         )
 
-    async def _get_or_create_conversation(self, session: AsyncSession, conversation_id: str | None) -> Conversation:
+    async def _get_or_create_conversation(
+        self,
+        session: AsyncSession,
+        conversation_id: str | None,
+        user_message: str,
+    ) -> Conversation:
         if conversation_id:
             conversation = await session.get(Conversation, conversation_id)
             if conversation:
                 return conversation
-        conversation = Conversation()
+        title = user_message.strip().splitlines()[0][:60] or "New conversation"
+        conversation = Conversation(title=title)
         session.add(conversation)
         await session.flush()
         return conversation
+
+    def _serialize_tool_call(self, tool_call: ToolCall) -> dict[str, Any]:
+        return {
+            "server_id": tool_call.server_id,
+            "tool_name": tool_call.tool_name,
+            "arguments": tool_call.arguments,
+        }
+
+    def _serialize_steps(self, executed_steps: list[ExecutedToolStep]) -> list[dict[str, Any]]:
+        return [
+            {
+                "server_id": step.tool_call.server_id,
+                "tool_name": step.tool_call.tool_name,
+                "arguments": step.tool_call.arguments,
+                "result": step.result,
+                "is_error": step.is_error,
+            }
+            for step in executed_steps
+        ]
+
+    def _fallback_summary(self, executed_steps: list[ExecutedToolStep]) -> str:
+        if not executed_steps:
+            return "No tool call was required."
+        return "Completed the requested tool actions."
+
+    def _build_approval_context(
+        self,
+        tool_call: ToolCall,
+        user_message: str,
+        executed_steps: list[ExecutedToolStep],
+    ) -> dict[str, Any]:
+        return {
+            "__tool_arguments__": tool_call.arguments,
+            "__user_message__": user_message,
+            "__executed_steps__": self._serialize_steps(executed_steps),
+        }
+
+    def _extract_approval_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        tool_arguments = payload.get("__tool_arguments__", payload)
+        return {
+            "tool_arguments": tool_arguments,
+            "user_message": payload.get("__user_message__", "approved tool execution"),
+            "executed_steps": payload.get("__executed_steps__", []),
+        }
+
+    def _executed_step_from_dict(self, payload: dict[str, Any]) -> ExecutedToolStep:
+        return ExecutedToolStep(
+            tool_call=ToolCall(
+                server_id=payload["server_id"],
+                tool_name=payload["tool_name"],
+                arguments=payload.get("arguments", {}),
+            ),
+            result=payload.get("result", {}),
+            is_error=payload.get("is_error", False),
+        )

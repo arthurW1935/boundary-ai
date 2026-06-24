@@ -26,6 +26,9 @@ class MCPManager:
         session: AsyncSession,
         *,
         python_executable: str,
+        exa_enabled: bool,
+        exa_url: str,
+        exa_api_key: str | None,
         remote_url: str | None,
         remote_transport: str,
         remote_name: str,
@@ -41,6 +44,17 @@ class MCPManager:
             },
         )
 
+        if exa_enabled:
+            exa_config: dict[str, Any] = {"url": exa_url}
+            if exa_api_key:
+                exa_config["headers"] = {"Authorization": f"Bearer {exa_api_key}"}
+            await self._ensure_server(
+                session,
+                name="exa",
+                transport="streamable_http",
+                config=exa_config,
+            )
+
         if remote_url:
             await self._ensure_server(
                 session,
@@ -53,6 +67,8 @@ class MCPManager:
     async def _ensure_server(self, session: AsyncSession, *, name: str, transport: str, config: dict[str, Any]) -> None:
         existing = await session.scalar(select(MCPServer).where(MCPServer.name == name))
         if existing:
+            existing.transport = transport
+            existing.config_json = config
             return
         session.add(MCPServer(name=name, transport=transport, enabled=True, config_json=config))
 
@@ -92,8 +108,13 @@ class MCPManager:
             await stack.aclose()
 
     async def refresh_server_tools(self, session: AsyncSession, server: MCPServer) -> list[ToolDescriptor]:
-        async with self.open_session(server) as client:
-            result = await client.list_tools()
+        try:
+            async with self.open_session(server) as client:
+                result = await client.list_tools()
+        except Exception as exc:  # noqa: BLE001
+            server.last_error = str(exc)
+            await session.flush()
+            raise
 
         await session.execute(delete(DiscoveredTool).where(DiscoveredTool.server_id == server.id))
         tool_descriptors: list[ToolDescriptor] = []
@@ -132,7 +153,7 @@ class MCPManager:
         ).all()
         descriptors: list[ToolDescriptor] = []
         for server in servers:
-            if refresh:
+            if refresh or not server.tools:
                 try:
                     descriptors.extend(await self.refresh_server_tools(session, server))
                 except Exception as exc:  # noqa: BLE001
@@ -163,8 +184,16 @@ class MCPManager:
         if server is None:
             raise ValueError(f"Unknown MCP server: {server_id}")
 
-        async with self.open_session(server) as client:
-            result = await client.call_tool(tool_name, arguments)
+        try:
+            async with self.open_session(server) as client:
+                result = await client.call_tool(tool_name, arguments)
+        except Exception as exc:  # noqa: BLE001
+            server.last_error = str(exc)
+            await session.flush()
+            raise
+
+        server.last_error = None
+        await session.flush()
 
         normalized = result.model_dump(mode="json")
         structured = normalized.get("structuredContent")

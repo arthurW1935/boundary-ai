@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,10 +19,18 @@ from armoriq_api.config import get_settings
 from armoriq_api.db import get_session, init_db
 from armoriq_api.llm import get_planner
 from armoriq_api.mcp_manager import MCPManager
-from armoriq_api.models import ApprovalRequest, AuditEvent, Conversation, MCPServer, Message, Policy
+from armoriq_api.models import ApprovalRequest, AuditEvent, Conversation, MCPServer, Message, Policy, Run
 from armoriq_api.policy import PolicyEngine
 from armoriq_api.realtime import EventBroker
-from armoriq_api.schemas import ApprovalDecisionRequest, ChatRequest, MCPServerCreate, MCPServerUpdate, PolicyCreate, PolicyUpdate
+from armoriq_api.schemas import (
+    ApprovalDecisionRequest,
+    ChatRequest,
+    ConversationCreate,
+    MCPServerCreate,
+    MCPServerUpdate,
+    PolicyCreate,
+    PolicyUpdate,
+)
 
 
 settings = get_settings()
@@ -40,6 +49,9 @@ async def lifespan(app: FastAPI):
         await mcp_manager.ensure_seed_servers(
             session,
             python_executable=sys.executable,
+            exa_enabled=settings.exa_mcp_enabled,
+            exa_url=settings.exa_mcp_url,
+            exa_api_key=settings.exa_api_key,
             remote_url=settings.remote_mcp_url,
             remote_transport=settings.remote_mcp_transport,
             remote_name=settings.remote_mcp_name,
@@ -69,18 +81,53 @@ async def health() -> dict[str, str]:
 @app.get("/api/conversations")
 async def list_conversations(session: AsyncSession = Depends(get_session)) -> list[dict]:
     conversations = (await session.scalars(select(Conversation).order_by(Conversation.created_at.desc()))).all()
-    return [
-        {
-            "id": conversation.id,
-            "title": conversation.title,
-            "token_budget": conversation.token_budget,
-            "cost_budget": conversation.cost_budget,
-            "spent_tokens": conversation.spent_tokens,
-            "spent_cost": conversation.spent_cost,
-            "created_at": conversation.created_at,
-        }
-        for conversation in conversations
-    ]
+    summaries = []
+    for conversation in conversations:
+        latest_run = await session.scalar(
+            select(Run).where(Run.conversation_id == conversation.id).order_by(Run.created_at.desc()).limit(1)
+        )
+        pending_approval = await session.scalar(
+            select(ApprovalRequest)
+            .where(
+                ApprovalRequest.conversation_id == conversation.id,
+                ApprovalRequest.status == "pending",
+            )
+            .order_by(ApprovalRequest.created_at.desc())
+            .limit(1)
+        )
+        latest_message = await session.scalar(
+            select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at.desc()).limit(1)
+        )
+        summaries.append(
+            {
+                "id": conversation.id,
+                "title": conversation.title,
+                "token_budget": conversation.token_budget,
+                "cost_budget": conversation.cost_budget,
+                "spent_tokens": conversation.spent_tokens,
+                "spent_cost": conversation.spent_cost,
+                "created_at": conversation.created_at,
+                "updated_at": conversation.updated_at,
+                "latest_run_status": latest_run.status if latest_run else "idle",
+                "pending_approval": pending_approval is not None,
+                "pending_approval_reason": pending_approval.reason if pending_approval else None,
+                "latest_message_preview": (latest_message.content[:120] if latest_message else ""),
+            }
+        )
+    return summaries
+
+
+@app.post("/api/conversations")
+async def create_conversation(payload: ConversationCreate, session: AsyncSession = Depends(get_session)) -> dict:
+    conversation = Conversation(
+        title=payload.title or "New conversation",
+        token_budget=payload.token_budget,
+        cost_budget=payload.cost_budget,
+    )
+    session.add(conversation)
+    await session.flush()
+    await session.commit()
+    return {"id": conversation.id}
 
 
 @app.get("/api/conversations/{conversation_id}/messages")
@@ -122,6 +169,7 @@ async def list_mcp_servers(session: AsyncSession = Depends(get_session)) -> list
             "last_error": server.last_error,
             "last_discovered_at": server.last_discovered_at,
             "tool_count": len(server.tools),
+            "status": _server_status(server),
         }
         for server in servers
     ]
@@ -281,7 +329,7 @@ async def list_approvals(session: AsyncSession = Depends(get_session)) -> list[d
             "conversation_id": approval.conversation_id,
             "server_id": approval.server_id,
             "tool_name": approval.tool_name,
-            "arguments": approval.arguments_json,
+            "arguments": _approval_arguments(approval.arguments_json),
             "status": approval.status,
             "reason": approval.reason,
             "expires_at": approval.expires_at,
@@ -335,3 +383,22 @@ async def stream_events(request: Request):
                     yield {"event": "ping", "data": json.dumps({"ts": "keepalive"})}
 
     return EventSourceResponse(event_generator())
+
+
+def _server_status(server: MCPServer) -> str:
+    if not server.enabled:
+        return "disabled"
+    if server.last_error:
+        lowered = server.last_error.lower()
+        if "401" in lowered or "403" in lowered or "unauthorized" in lowered or "forbidden" in lowered:
+            return "auth_error"
+        if server.last_discovered_at:
+            return "execution_failed"
+        return "discovery_failed"
+    if server.last_discovered_at and server.tools:
+        return "connected"
+    return "pending"
+
+
+def _approval_arguments(payload: dict[str, Any]) -> dict[str, Any]:
+    return payload.get("__tool_arguments__", payload)

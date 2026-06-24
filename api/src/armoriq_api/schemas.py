@@ -23,6 +23,7 @@ class ChatResponse(BaseModel):
     status: str
     assistant_message: str
     tool_call: dict[str, Any] | None = None
+    executed_tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     approval_request_id: str | None = None
 
 
@@ -39,7 +40,7 @@ class MCPServerUpdate(BaseModel):
 
 
 class PolicyCreate(BaseModel):
-    name: str
+    name: str = Field(min_length=1)
     rule_type: Literal["block_tool", "require_approval", "validate_args", "token_budget", "cost_budget"]
     enabled: bool = True
     priority: int = 100

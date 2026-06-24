@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4.1-mini"
+    max_tool_steps: int = 6
+    exa_mcp_enabled: bool = True
+    exa_mcp_url: str = "https://mcp.exa.ai/mcp"
+    exa_api_key: str | None = None
     remote_mcp_url: str | None = None
     remote_mcp_transport: str = "sse"
     remote_mcp_name: str = "context7"
