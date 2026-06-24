@@ -12,25 +12,31 @@
   - Web: `cd web && npm run dev`
 
 ## Recommended Demo Flow
-1. Open `MCP Servers` and show the seeded `local-sandbox` server.
-2. Open `Policies` and create:
+1. Open `MCP Servers` and show both seeded servers:
+   - `local-sandbox`
+   - `exa`
+2. Refresh the servers and show that the discovered tool catalog contains tools from both.
+3. Open `Chat` and send:
+   - `search the web for ArmorIQ`
+4. Show the Exa tool call completing through the guarded agent.
+5. Open `Policies` and create:
    - `block_tool` for `delete_file`
    - `require_approval` for `write_file`
-3. Open `Chat` and send:
+6. Open `Chat` and send:
    - `list files`
    - `write file notes/demo.txt: hello from the guarded agent`
-4. Show the write pausing for approval.
-5. Open `Approvals` and approve the pending tool call.
-6. Return to `Chat` and show the assistant response after resume.
-7. Send:
+7. Show the write pausing for approval and the composer disabling for that conversation.
+8. Open `Approvals` and approve the pending tool call.
+9. Return to `Chat` and show the assistant response after resume.
+10. Send:
    - `delete file notes/demo.txt`
-8. Show the tool call getting blocked.
-9. Open `Audit Logs` and walk through:
-   - tool discovery
+11. Show the tool call getting blocked.
+12. Open `Audit Logs` and walk through:
+   - dual-server tool discovery
    - policy decision
    - approval request
    - approval decision
-   - tool result
+   - local and remote tool results
 
 ## Sample Policy Payloads
 - Block deletes:
@@ -78,8 +84,9 @@
 
 ## Remote MCP Notes
 - The backend supports `sse` and `streamable_http` MCP transports.
-- To add an external MCP server:
-  - open `MCP Servers`
-  - choose the transport
-  - paste the transport config JSON
-- The repo does not ship a live `Context7` endpoint because remote MCP URLs and auth can differ by environment. Configure it through the UI or `REMOTE_MCP_*` env vars when you have the real endpoint details.
+- Exa hosted MCP is seeded by default through:
+  - `EXA_MCP_ENABLED=true`
+  - `EXA_MCP_URL=https://mcp.exa.ai/mcp`
+- If you have an Exa API key, set:
+  - `EXA_API_KEY=<your key>`
+- Without a key, Exa still works anonymously for lightweight demos, subject to remote service limits.
