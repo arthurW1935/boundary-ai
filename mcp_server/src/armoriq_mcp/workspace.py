@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,11 +43,13 @@ class SandboxWorkspace:
         for child in sorted(target.iterdir(), key=lambda entry: (not entry.is_dir(), entry.name.lower())):
             rel_path = child.relative_to(self.root).as_posix()
             items.append(
-                WorkspaceEntry(
-                    path=rel_path,
-                    is_dir=child.is_dir(),
-                    size=0 if child.is_dir() else child.stat().st_size,
-                ).__dict__
+                asdict(
+                    WorkspaceEntry(
+                        path=rel_path,
+                        is_dir=child.is_dir(),
+                        size=0 if child.is_dir() else child.stat().st_size,
+                    )
+                )
             )
         return items
 

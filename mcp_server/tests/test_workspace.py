@@ -16,6 +16,14 @@ def test_write_read_and_search(tmp_path: Path) -> None:
     assert search_result["matches"][0]["path"] == "notes/demo.txt"
 
 
+def test_list_files_returns_serializable_entries(tmp_path: Path) -> None:
+    workspace = SandboxWorkspace(tmp_path)
+    workspace.write_file("notes/demo.txt", "hello")
+
+    result = workspace.list_files("notes")
+    assert result == [{"path": "notes/demo.txt", "is_dir": False, "size": 5}]
+
+
 def test_rejects_escape_outside_sandbox(tmp_path: Path) -> None:
     workspace = SandboxWorkspace(tmp_path)
 
