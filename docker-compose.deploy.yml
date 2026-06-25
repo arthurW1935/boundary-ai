@@ -1,0 +1,88 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-armoriq}
+      POSTGRES_USER: ${POSTGRES_USER:-armoriq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-armoriq}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-armoriq} -d ${POSTGRES_DB:-armoriq}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-armoriq}:${POSTGRES_PASSWORD:-armoriq}@postgres:5432/${POSTGRES_DB:-armoriq}
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_ORIGIN: ${APP_ORIGIN}
+      LLM_PROVIDER: openai
+      ALLOW_DEMO_MOCK_PLANNER: "false"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      EXA_MCP_ENABLED: ${EXA_MCP_ENABLED:-true}
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      ARMORIQ_SANDBOX_ROOT: /data/mcp-sandbox
+    expose:
+      - "8000"
+    volumes:
+      - mcp_sandbox:/data/mcp-sandbox
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
+    restart: unless-stopped
+    depends_on:
+      - api
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - web
+      - api
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  redis_data:
+  mcp_sandbox:
+  caddy_data:
+  caddy_config:
