@@ -28,10 +28,12 @@ export function useLiveRefresh(onEvent: () => void) {
       "policy.updated",
       "policy.deleted",
       "policy.decision",
+      "policy.budget_blocked",
       "approval.requested",
       "approval.approved",
       "approval.denied",
-      "approval.expired"
+      "approval.expired",
+      "approval.invalidated"
     ];
 
     const handler = (event: MessageEvent<string>) => {

@@ -25,12 +25,12 @@ export default function ApprovalsPage() {
 
   async function takeAction(approvalId: string, decision: "approved" | "denied") {
     try {
-      await apiSend(`/api/approvals/${approvalId}/decision`, {
+      const response = await apiSend<{ status: string; assistant_message: string }>(`/api/approvals/${approvalId}/decision`, {
         method: "POST",
         body: JSON.stringify({ decision })
       });
       await loadApprovals();
-      setStatus(`Approval ${decision}.`);
+      setStatus(`${response.status}: ${response.assistant_message}`);
     } catch (error) {
       setStatus(String(error));
     }
@@ -69,7 +69,9 @@ export default function ApprovalsPage() {
                       ? "warning"
                       : approval.status === "approved"
                         ? "success"
-                        : "danger"
+                        : approval.status === "denied" || approval.status === "expired" || approval.status === "superseded"
+                          ? "danger"
+                          : ""
                   }`}
                 >
                   {approval.status}

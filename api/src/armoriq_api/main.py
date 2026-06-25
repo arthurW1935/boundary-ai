@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -45,6 +45,8 @@ agent_runtime = AgentRuntime(settings, get_planner(settings), mcp_manager, polic
 async def lifespan(app: FastAPI):
     await init_db()
     await broker.connect()
+    sweeper_stop = asyncio.Event()
+    sweeper_task = asyncio.create_task(_approval_sweeper(sweeper_stop))
     async for session in get_session():
         await mcp_manager.ensure_seed_servers(
             session,
@@ -60,6 +62,10 @@ async def lifespan(app: FastAPI):
         await session.commit()
         break
     yield
+    sweeper_stop.set()
+    sweeper_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await sweeper_task
     await broker.close()
 
 
@@ -80,6 +86,8 @@ async def health() -> dict[str, str]:
 
 @app.get("/api/conversations")
 async def list_conversations(session: AsyncSession = Depends(get_session)) -> list[dict]:
+    await agent_runtime.expire_pending_approvals(session)
+    await session.commit()
     conversations = (await session.scalars(select(Conversation).order_by(Conversation.created_at.desc()))).all()
     summaries = []
     for conversation in conversations:
@@ -321,6 +329,8 @@ async def delete_policy(policy_id: str, session: AsyncSession = Depends(get_sess
 
 @app.get("/api/approvals")
 async def list_approvals(session: AsyncSession = Depends(get_session)) -> list[dict]:
+    await agent_runtime.expire_pending_approvals(session)
+    await session.commit()
     approvals = (await session.scalars(select(ApprovalRequest).order_by(ApprovalRequest.created_at.desc()))).all()
     return [
         {
@@ -402,3 +412,16 @@ def _server_status(server: MCPServer) -> str:
 
 def _approval_arguments(payload: dict[str, Any]) -> dict[str, Any]:
     return payload.get("__tool_arguments__", payload)
+
+
+async def _approval_sweeper(stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        async for session in get_session():
+            expired = await agent_runtime.expire_pending_approvals(session)
+            if expired:
+                await session.commit()
+            break
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=settings.approval_sweeper_interval_seconds)
+        except TimeoutError:
+            continue

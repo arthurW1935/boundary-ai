@@ -63,7 +63,36 @@ def test_validate_args_blocks_bad_path() -> None:
     )
     decision = engine.evaluate(make_intent(path="../escape.txt"), [policy])
     assert decision.verdict == "block"
-    assert "must start with" in decision.reason
+    assert "must not escape" in decision.reason
+
+
+def test_validate_args_blocks_normalized_escape_outside_prefix() -> None:
+    engine = PolicyEngine()
+    policy = make_policy(
+        rule_type="validate_args",
+        target_tool="write_file",
+        conditions_json={"path_arg": "path", "allow_prefixes": ["notes/"]},
+        action_json=None,
+    )
+
+    decision = engine.evaluate(make_intent(path="notes/../secret.txt"), [policy])
+
+    assert decision.verdict == "block"
+    assert "must stay under one of" in decision.reason
+
+
+def test_validate_args_allows_normalized_path_inside_prefix() -> None:
+    engine = PolicyEngine()
+    policy = make_policy(
+        rule_type="validate_args",
+        target_tool="write_file",
+        conditions_json={"path_arg": "path", "allow_prefixes": ["notes/"]},
+        action_json=None,
+    )
+
+    decision = engine.evaluate(make_intent(path="notes/sub/../demo.txt"), [policy])
+
+    assert decision.verdict == "allow"
 
 
 def test_tool_scope_matches_human_readable_tool_name() -> None:

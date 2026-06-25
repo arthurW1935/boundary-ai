@@ -1,7 +1,7 @@
 import pytest
 
 from armoriq_api.config import Settings
-from armoriq_api.llm import MockPlanner, OpenAICompatPlanner
+from armoriq_api.llm import MissingPlanner, MockPlanner, OpenAICompatPlanner, get_planner
 from armoriq_api.types import ExecutedToolStep, PlannerMessage, ToolCall, ToolDescriptor
 
 
@@ -104,3 +104,9 @@ def test_openai_planner_builds_safe_unique_tool_aliases() -> None:
     assert all(":" not in alias for alias in aliases)
     assert all("/" not in alias for alias in aliases)
     assert list(aliases.values()) == tools
+
+
+def test_get_planner_requires_explicit_mock_opt_in() -> None:
+    planner = get_planner(Settings(llm_provider="mock", allow_demo_mock_planner=False))
+
+    assert isinstance(planner, MissingPlanner)

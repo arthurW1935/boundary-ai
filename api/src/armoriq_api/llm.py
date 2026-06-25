@@ -21,6 +21,20 @@ class BasePlanner:
         raise NotImplementedError
 
 
+class MissingPlanner(BasePlanner):
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    async def plan(
+        self,
+        user_message: str,
+        tools: list[ToolDescriptor],
+        executed_steps: list[ExecutedToolStep],
+        conversation_history: list[PlannerMessage],
+    ) -> PlannerDecision:
+        raise RuntimeError(self.message)
+
+
 class MockPlanner(BasePlanner):
     async def plan(
         self,
@@ -310,4 +324,9 @@ class OpenAICompatPlanner(BasePlanner):
 def get_planner(settings: Settings) -> BasePlanner:
     if settings.llm_provider == "openai" and settings.openai_api_key:
         return OpenAICompatPlanner(settings)
-    return MockPlanner()
+    if settings.llm_provider == "mock" and settings.allow_demo_mock_planner:
+        return MockPlanner()
+    return MissingPlanner(
+        "No reviewed LLM provider is configured. Set OPENAI_API_KEY for the OpenAI-compatible planner "
+        "or explicitly enable ALLOW_DEMO_MOCK_PLANNER=true with LLM_PROVIDER=mock for local-only demos."
+    )

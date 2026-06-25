@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from armoriq_api.models import Policy
@@ -149,10 +150,23 @@ class PolicyEngine:
         path_arg = conditions.get("path_arg")
         if path_arg:
             path_value = str(arguments.get(path_arg, ""))
+            normalized_path, error = self._normalize_relative_path(path_value)
+            if error is not None:
+                return False, f"Argument '{path_arg}' {error}"
+
+            normalized_prefixes: list[str] = []
             for prefix in conditions.get("allow_prefixes", []):
-                if path_value.startswith(prefix):
+                normalized_prefix, prefix_error = self._normalize_relative_path(str(prefix), allow_empty=True)
+                if prefix_error is not None:
+                    continue
+                normalized_prefixes.append(normalized_prefix)
+                if normalized_prefix == ".":
                     return True, "Path prefix allowed."
-            return False, f"Argument '{path_arg}' must start with one of {conditions.get('allow_prefixes', [])}."
+                if normalized_path == normalized_prefix or normalized_path.startswith(f"{normalized_prefix}/"):
+                    return True, "Path prefix allowed."
+            return False, (
+                f"Argument '{path_arg}' must stay under one of {normalized_prefixes or conditions.get('allow_prefixes', [])}."
+            )
 
         blocked_args = conditions.get("blocked_values", {})
         for arg_name, blocked_values in blocked_args.items():
@@ -164,3 +178,26 @@ class PolicyEngine:
     def _normalize_tool_name(self, value: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
         return normalized.strip("_")
+
+    def _normalize_relative_path(self, value: str, *, allow_empty: bool = False) -> tuple[str, str | None]:
+        candidate = value.replace("\\", "/").strip()
+        if not candidate:
+            if allow_empty:
+                return ".", None
+            return "", "must not be empty."
+        if candidate.startswith("/") or re.match(r"^[a-zA-Z]:", candidate):
+            return "", "must be a relative POSIX-style path."
+
+        parts: list[str] = []
+        for part in PurePosixPath(candidate).parts:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if not parts:
+                    return "", "must not escape the allowed directory."
+                parts.pop()
+                continue
+            parts.append(part)
+
+        normalized = "/".join(parts) or "."
+        return normalized, None

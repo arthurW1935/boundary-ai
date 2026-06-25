@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./armoriq.db"
     redis_url: str | None = None
     frontend_origin: str = "http://localhost:3000"
-    llm_provider: str = "mock"
+    llm_provider: str = "openai"
+    allow_demo_mock_planner: bool = False
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4.1-mini"
@@ -29,6 +30,7 @@ class Settings(BaseSettings):
     remote_mcp_transport: str = "sse"
     remote_mcp_name: str = "context7"
     approval_ttl_seconds: int = 600
+    approval_sweeper_interval_seconds: int = 5
 
 
 @lru_cache

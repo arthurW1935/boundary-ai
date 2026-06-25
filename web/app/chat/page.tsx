@@ -6,6 +6,19 @@ import { apiGet, apiSend } from "@/lib/api";
 import { useLiveRefresh } from "@/lib/use-live-refresh";
 import { ChatResponse, Conversation, Message } from "@/lib/types";
 
+function runStatusClass(status: string) {
+  if (status === "waiting_approval") {
+    return "warning";
+  }
+  if (status === "blocked" || status === "failed" || status === "denied") {
+    return "danger";
+  }
+  if (status === "completed") {
+    return "success";
+  }
+  return "";
+}
+
 function compactLine(value: string, fallback: string, maxLength = 44) {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) {
@@ -235,14 +248,7 @@ export default function ChatPage() {
                       )}
                   </strong>
                   <span
-                    className={`badge ${
-                      conversation.latest_run_status === "waiting_approval"
-                        ? "warning"
-                        : conversation.latest_run_status === "blocked" ||
-                            conversation.latest_run_status === "failed"
-                          ? "danger"
-                          : "success"
-                    }`}
+                    className={`badge ${runStatusClass(conversation.latest_run_status)}`}
                   >
                     {conversation.pending_approval ? "approval" : conversation.latest_run_status}
                   </span>
@@ -267,7 +273,9 @@ export default function ChatPage() {
                 </p>
               )}
             </div>
-            <span className="badge">{selectedConversation?.latest_run_status ?? "idle"}</span>
+            <span className={`badge ${runStatusClass(selectedConversation?.latest_run_status ?? "idle")}`}>
+              {selectedConversation?.latest_run_status ?? "idle"}
+            </span>
           </div>
 
           <div className="chat-transcript" ref={transcriptRef}>

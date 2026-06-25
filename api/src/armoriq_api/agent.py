@@ -37,6 +37,7 @@ class AgentRuntime:
         conversation = await self._get_or_create_conversation(session, conversation_id, user_message)
         pending_approval = None
         if conversation_id:
+            await self.expire_pending_approvals(session, conversation_id=conversation.id)
             pending_approval = await session.scalar(
                 select(ApprovalRequest)
                 .where(
@@ -99,18 +100,8 @@ class AgentRuntime:
         if run is None or conversation is None:
             raise ValueError("Approval request is missing its run context.")
 
-        if approval.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-            approval.status = "expired"
-            run.status = "denied"
-            run.latest_response = "Approval expired before anyone reviewed it."
-            session.add(Message(conversation_id=conversation.id, role="assistant", content=run.latest_response))
-            await self.audit_logger.record(
-                session,
-                "approval.expired",
-                {"approval_request_id": approval.id},
-                conversation_id=conversation.id,
-                run_id=run.id,
-            )
+        if self._as_utc(approval.expires_at) < datetime.now(timezone.utc):
+            await self._expire_approval(session, approval, run, conversation)
             await session.commit()
             return ChatResponse(
                 conversation_id=conversation.id,
@@ -153,12 +144,14 @@ class AgentRuntime:
             arguments=stored_context["tool_arguments"],
         )
         tools = await self.mcp_manager.list_tools(session, refresh=False)
-        step_result = await self._execute_allowed_tool_step(
-            session,
-            conversation,
-            run,
-            tool_call,
-            executed_steps,
+        step_result = await self._evaluate_tool_call(
+            session=session,
+            conversation=conversation,
+            run=run,
+            user_message=stored_context["user_message"],
+            tool_call=tool_call,
+            executed_steps=executed_steps,
+            approval_context=approval,
         )
         if isinstance(step_result, ChatResponse):
             await session.commit()
@@ -186,6 +179,10 @@ class AgentRuntime:
         executed_steps: list[ExecutedToolStep],
     ) -> ChatResponse:
         for _ in range(self.settings.max_tool_steps):
+            budget_response = await self._enforce_conversation_budgets(session, conversation, run, executed_steps)
+            if budget_response is not None:
+                return budget_response
+
             conversation_history = await self._get_conversation_history(session, conversation.id)
             try:
                 plan = await self.planner.plan(user_message, tools, executed_steps, conversation_history)
@@ -231,6 +228,16 @@ class AgentRuntime:
                     executed_tool_calls=self._serialize_steps(executed_steps),
                 )
 
+            budget_response = await self._enforce_conversation_budgets(
+                session,
+                conversation,
+                run,
+                executed_steps,
+                tool_call=plan.tool_call,
+            )
+            if budget_response is not None:
+                return budget_response
+
             tool_response = await self._evaluate_tool_call(
                 session,
                 conversation,
@@ -270,6 +277,7 @@ class AgentRuntime:
         user_message: str,
         tool_call: ToolCall,
         executed_steps: list[ExecutedToolStep],
+        approval_context: ApprovalRequest | None = None,
     ) -> ChatResponse | ExecutedToolStep:
         server = await session.get(MCPServer, tool_call.server_id)
         if server is None:
@@ -283,50 +291,56 @@ class AgentRuntime:
                 executed_tool_calls=self._serialize_steps(executed_steps),
             )
 
-        intent = ToolExecutionIntent(
-            conversation_id=conversation.id,
-            run_id=run.id,
-            server_id=server.id,
-            server_name=server.name,
-            tool_name=tool_call.tool_name,
-            arguments=tool_call.arguments,
-            token_budget=conversation.token_budget,
-            cost_budget=conversation.cost_budget,
-            spent_tokens=conversation.spent_tokens,
-            spent_cost=conversation.spent_cost,
-        )
-        policies = (await session.scalars(select(Policy).where(Policy.enabled.is_(True)))).all()
+        intent = self._build_intent(conversation, run, server, tool_call)
+        policies = await self._load_policies(session)
         decision = self.policy_engine.evaluate(intent, policies)
-        await self.audit_logger.record(
+        await self._record_policy_decision(
             session,
-            "policy.decision",
-            {
-                "tool_name": tool_call.tool_name,
-                "server_id": tool_call.server_id,
-                "arguments": tool_call.arguments,
-                "verdict": decision.verdict,
-                "reason": decision.reason,
-                "matched_rule_ids": decision.matched_rule_ids,
-            },
             conversation_id=conversation.id,
             run_id=run.id,
+            tool_call=tool_call,
+            decision=decision,
+            source="approval_resume" if approval_context is not None else "planner",
         )
 
         if decision.verdict == "block":
-            assistant_message = f"Tool call blocked: {decision.reason}"
-            session.add(Message(conversation_id=conversation.id, role="assistant", content=assistant_message))
-            run.status = "blocked"
-            run.latest_response = assistant_message
-            return ChatResponse(
+            if approval_context is not None:
+                approval_context.status = "superseded"
+                approval_context.decided_at = datetime.utcnow()
+                if approval_context.decision_comment:
+                    approval_context.decision_comment = f"{approval_context.decision_comment}\nPolicy changed after approval."
+                else:
+                    approval_context.decision_comment = "Policy changed after approval."
+                await self.audit_logger.record(
+                    session,
+                    "approval.invalidated",
+                    {
+                        "approval_request_id": approval_context.id,
+                        "reason": decision.reason,
+                    },
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                )
+                return self._blocked_response(
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                    run=run,
+                    executed_steps=executed_steps,
+                    tool_call=tool_call,
+                    session=session,
+                    assistant_message=f"Approved tool call was blocked because policy changed: {decision.reason}",
+                )
+            return self._blocked_response(
                 conversation_id=conversation.id,
                 run_id=run.id,
-                status="blocked",
-                assistant_message=assistant_message,
-                tool_call=self._serialize_tool_call(tool_call),
-                executed_tool_calls=self._serialize_steps(executed_steps),
+                run=run,
+                executed_steps=executed_steps,
+                tool_call=tool_call,
+                session=session,
+                assistant_message=f"Tool call blocked: {decision.reason}",
             )
 
-        if decision.verdict == "require_approval":
+        if decision.verdict == "require_approval" and approval_context is None:
             approval = ApprovalRequest(
                 run_id=run.id,
                 conversation_id=conversation.id,
@@ -365,6 +379,28 @@ class AgentRuntime:
             )
 
         return await self._execute_allowed_tool_step(session, conversation, run, tool_call, executed_steps)
+
+    async def expire_pending_approvals(self, session: AsyncSession, conversation_id: str | None = None) -> int:
+        now = datetime.now(timezone.utc)
+        query = select(ApprovalRequest).where(ApprovalRequest.status == "pending")
+        if conversation_id is not None:
+            query = query.where(ApprovalRequest.conversation_id == conversation_id)
+        approvals = (await session.scalars(query)).all()
+
+        expired = 0
+        for approval in approvals:
+            if self._as_utc(approval.expires_at) >= now:
+                continue
+            run = await session.get(Run, approval.run_id)
+            conversation = await session.get(Conversation, approval.conversation_id)
+            if run is None or conversation is None:
+                approval.status = "expired"
+                approval.decided_at = datetime.utcnow()
+                expired += 1
+                continue
+            await self._expire_approval(session, approval, run, conversation)
+            expired += 1
+        return expired
 
     async def _execute_allowed_tool_step(
         self,
@@ -415,6 +451,150 @@ class AgentRuntime:
             tool_call=tool_call,
             result=tool_result,
             is_error=bool(tool_result.get("raw", {}).get("isError")) if isinstance(tool_result, dict) else False,
+        )
+
+    async def _enforce_conversation_budgets(
+        self,
+        session: AsyncSession,
+        conversation: Conversation,
+        run: Run,
+        executed_steps: list[ExecutedToolStep],
+        tool_call: ToolCall | None = None,
+    ) -> ChatResponse | None:
+        if conversation.token_budget is not None and conversation.spent_tokens >= conversation.token_budget:
+            await self.audit_logger.record(
+                session,
+                "policy.budget_blocked",
+                {
+                    "kind": "token",
+                    "spent_tokens": conversation.spent_tokens,
+                    "token_budget": conversation.token_budget,
+                },
+                conversation_id=conversation.id,
+                run_id=run.id,
+            )
+            return self._blocked_response(
+                conversation_id=conversation.id,
+                run_id=run.id,
+                run=run,
+                executed_steps=executed_steps,
+                tool_call=tool_call,
+                session=session,
+                assistant_message="Execution blocked: conversation token budget exceeded.",
+            )
+        if conversation.cost_budget is not None and conversation.spent_cost >= conversation.cost_budget:
+            await self.audit_logger.record(
+                session,
+                "policy.budget_blocked",
+                {
+                    "kind": "cost",
+                    "spent_cost": conversation.spent_cost,
+                    "cost_budget": conversation.cost_budget,
+                },
+                conversation_id=conversation.id,
+                run_id=run.id,
+            )
+            return self._blocked_response(
+                conversation_id=conversation.id,
+                run_id=run.id,
+                run=run,
+                executed_steps=executed_steps,
+                tool_call=tool_call,
+                session=session,
+                assistant_message="Execution blocked: conversation cost budget exceeded.",
+            )
+        return None
+
+    async def _expire_approval(
+        self,
+        session: AsyncSession,
+        approval: ApprovalRequest,
+        run: Run,
+        conversation: Conversation,
+    ) -> None:
+        approval.status = "expired"
+        approval.decided_at = datetime.utcnow()
+        run.status = "denied"
+        run.latest_response = "Approval expired before anyone reviewed it."
+        session.add(Message(conversation_id=conversation.id, role="assistant", content=run.latest_response))
+        await self.audit_logger.record(
+            session,
+            "approval.expired",
+            {"approval_request_id": approval.id},
+            conversation_id=conversation.id,
+            run_id=run.id,
+        )
+
+    async def _load_policies(self, session: AsyncSession) -> list[Policy]:
+        return (await session.scalars(select(Policy).where(Policy.enabled.is_(True)))).all()
+
+    def _build_intent(
+        self,
+        conversation: Conversation,
+        run: Run,
+        server: MCPServer,
+        tool_call: ToolCall,
+    ) -> ToolExecutionIntent:
+        return ToolExecutionIntent(
+            conversation_id=conversation.id,
+            run_id=run.id,
+            server_id=server.id,
+            server_name=server.name,
+            tool_name=tool_call.tool_name,
+            arguments=tool_call.arguments,
+            token_budget=conversation.token_budget,
+            cost_budget=conversation.cost_budget,
+            spent_tokens=conversation.spent_tokens,
+            spent_cost=conversation.spent_cost,
+        )
+
+    async def _record_policy_decision(
+        self,
+        session: AsyncSession,
+        *,
+        conversation_id: str,
+        run_id: str,
+        tool_call: ToolCall,
+        decision,
+        source: str,
+    ) -> None:
+        await self.audit_logger.record(
+            session,
+            "policy.decision",
+            {
+                "tool_name": tool_call.tool_name,
+                "server_id": tool_call.server_id,
+                "arguments": tool_call.arguments,
+                "verdict": decision.verdict,
+                "reason": decision.reason,
+                "matched_rule_ids": decision.matched_rule_ids,
+                "source": source,
+            },
+            conversation_id=conversation_id,
+            run_id=run_id,
+        )
+
+    def _blocked_response(
+        self,
+        *,
+        conversation_id: str,
+        run_id: str,
+        run: Run,
+        executed_steps: list[ExecutedToolStep],
+        session: AsyncSession,
+        assistant_message: str,
+        tool_call: ToolCall | None = None,
+    ) -> ChatResponse:
+        session.add(Message(conversation_id=conversation_id, role="assistant", content=assistant_message))
+        run.status = "blocked"
+        run.latest_response = assistant_message
+        return ChatResponse(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            status="blocked",
+            assistant_message=assistant_message,
+            tool_call=self._serialize_tool_call(tool_call) if tool_call else None,
+            executed_tool_calls=self._serialize_steps(executed_steps),
         )
 
     async def _get_or_create_conversation(
@@ -506,3 +686,8 @@ class AgentRuntime:
             result=payload.get("result", {}),
             is_error=payload.get("is_error", False),
         )
+
+    def _as_utc(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)

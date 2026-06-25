@@ -1,9 +1,12 @@
 # Demo Notes
 
 ## Local Startup
+- Copy `api/.env.example` to `api/.env` and set `OPENAI_API_KEY`.
 - Backend venv:
   - `python -m venv api/.venv`
   - `api/.venv\Scripts\pip install -e mcp_server -e api pytest`
+- Infrastructure:
+  - `docker compose up -d postgres redis`
 - Frontend:
   - `cd web`
   - `npm install`
@@ -20,23 +23,28 @@
    - `search the web for ArmorIQ`
 4. Show the Exa tool call completing through the guarded agent.
 5. Open `Policies` and create:
-   - `block_tool` for `delete_file`
    - `require_approval` for `write_file`
+   - `validate_args` for `write_file` with `notes/` allowlist
+   - `block_tool` for `delete_file`
 6. Open `Chat` and send:
    - `list files`
    - `write file notes/demo.txt: hello from the guarded agent`
 7. Show the write pausing for approval and the composer disabling for that conversation.
-8. Open `Approvals` and approve the pending tool call.
-9. Return to `Chat` and show the assistant response after resume.
-10. Send:
+8. While the approval is pending, create a higher-priority `block_tool` rule for `write_file`.
+9. Open `Approvals` and approve the pending tool call.
+10. Return to `Chat` and show the resumed tool call being blocked because policy changed after approval.
+11. Disable the temporary `write_file` block rule, send the write again, and approve it successfully.
+12. Send:
    - `delete file notes/demo.txt`
-11. Show the tool call getting blocked.
-12. Open `Audit Logs` and walk through:
+13. Show the tool call getting blocked.
+14. Open `Audit Logs` and walk through:
    - dual-server tool discovery
    - policy decision
    - approval request
-   - approval decision
+   - approval invalidation after a live policy change
+   - approval decision after the second attempt
    - local and remote tool results
+15. Mention that if the approver goes offline, the request expires automatically and the run is denied on TTL.
 
 ## Sample Policy Payloads
 - Block deletes:
@@ -90,3 +98,7 @@
 - If you have an Exa API key, set:
   - `EXA_API_KEY=<your key>`
 - Without a key, Exa still works anonymously for lightweight demos, subject to remote service limits.
+
+## Notes for Review
+- The reviewed runtime path is the OpenAI-compatible planner with live MCP discovery.
+- `LLM_PROVIDER=mock` is still available for local-only demos, but only when `ALLOW_DEMO_MOCK_PLANNER=true`.
