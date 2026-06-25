@@ -171,6 +171,7 @@ class OpenAICompatPlanner(BasePlanner):
         tools: list[ToolDescriptor],
         executed_steps: list[ExecutedToolStep],
     ) -> PlannerDecision:
+        tool_aliases = self._build_tool_aliases(tools)
         payload = {
             "model": self.settings.openai_model,
             "messages": [
@@ -192,12 +193,12 @@ class OpenAICompatPlanner(BasePlanner):
                 {
                     "type": "function",
                     "function": {
-                        "name": f"{tool.server_id}::{tool.name}",
+                        "name": alias,
                         "description": tool.description or "",
                         "parameters": tool.input_schema or {"type": "object", "properties": {}},
                     },
                 }
-                for tool in tools
+                for alias, tool in tool_aliases.items()
             ],
         }
 
@@ -207,18 +208,29 @@ class OpenAICompatPlanner(BasePlanner):
                 headers={"Authorization": f"Bearer {self.settings.openai_api_key}"},
                 json=payload,
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(
+                    f"OpenAI request failed ({response.status_code}): {response.text}"
+                ) from exc
             data = response.json()
 
         message = data["choices"][0]["message"]
         usage = data.get("usage", {})
         if message.get("tool_calls"):
             call = message["tool_calls"][0]
-            server_id, tool_name = call["function"]["name"].split("::", maxsplit=1)
+            descriptor = tool_aliases.get(call["function"]["name"])
+            if descriptor is None:
+                raise RuntimeError(f"OpenAI returned unknown tool alias: {call['function']['name']}")
             arguments = json.loads(call["function"]["arguments"] or "{}")
             return PlannerDecision(
                 assistant_message=message.get("content"),
-                tool_call=ToolCall(server_id=server_id, tool_name=tool_name, arguments=arguments),
+                tool_call=ToolCall(
+                    server_id=descriptor.server_id,
+                    tool_name=descriptor.name,
+                    arguments=arguments,
+                ),
                 usage_tokens=usage.get("total_tokens", 0),
             )
 
@@ -243,6 +255,21 @@ class OpenAICompatPlanner(BasePlanner):
             + "\n".join(step_lines)
             + "\n\nDecide whether another tool call is needed or give the final answer."
         )
+
+    def _build_tool_aliases(self, tools: list[ToolDescriptor]) -> dict[str, ToolDescriptor]:
+        aliases: dict[str, ToolDescriptor] = {}
+        for index, tool in enumerate(tools, start=1):
+            server_part = re.sub(r"[^a-zA-Z0-9_-]", "_", tool.server_name)[:16] or "server"
+            tool_part = re.sub(r"[^a-zA-Z0-9_-]", "_", tool.name)[:32] or "tool"
+            base_alias = f"tool_{index}_{server_part}_{tool_part}"[:64]
+            alias = base_alias
+            suffix = 2
+            while alias in aliases:
+                suffix_text = f"_{suffix}"
+                alias = f"{base_alias[: 64 - len(suffix_text)]}{suffix_text}"
+                suffix += 1
+            aliases[alias] = tool
+        return aliases
 
 
 def get_planner(settings: Settings) -> BasePlanner:

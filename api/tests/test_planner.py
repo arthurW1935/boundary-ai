@@ -1,6 +1,7 @@
 import pytest
 
-from armoriq_api.llm import MockPlanner
+from armoriq_api.config import Settings
+from armoriq_api.llm import MockPlanner, OpenAICompatPlanner
 from armoriq_api.types import ExecutedToolStep, ToolCall, ToolDescriptor
 
 
@@ -65,3 +66,24 @@ async def test_mock_planner_can_select_exa_web_search() -> None:
     assert decision.tool_call is not None
     assert decision.tool_call.tool_name == "web_search_exa"
     assert decision.tool_call.arguments["query"] == "ArmorIQ"
+
+
+def test_openai_planner_builds_safe_unique_tool_aliases() -> None:
+    planner = OpenAICompatPlanner(
+        Settings(
+            llm_provider="openai",
+            openai_api_key="test-key",
+            openai_model="gpt-4.1-mini",
+        )
+    )
+    tools = [
+        ToolDescriptor("server:1", "local/sandbox", "stdio", "write:file", None, None),
+        ToolDescriptor("server:2", "local/sandbox", "stdio", "write:file", None, None),
+    ]
+
+    aliases = planner._build_tool_aliases(tools)
+
+    assert len(aliases) == 2
+    assert all(":" not in alias for alias in aliases)
+    assert all("/" not in alias for alias in aliases)
+    assert list(aliases.values()) == tools

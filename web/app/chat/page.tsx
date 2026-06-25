@@ -96,7 +96,7 @@ export default function ChatPage() {
   }
 
   return (
-    <>
+    <div className="page page-fixed">
       <header className="page-header">
         <div>
           <h2>Agent Chat</h2>
@@ -104,8 +104,8 @@ export default function ChatPage() {
             Run the guarded agent through a conversation-first workspace. Each thread keeps its own
             MCP activity, policy state, approvals, and audit trail.
           </p>
+          {status && <p className="page-status">{status}</p>}
         </div>
-        <span className="badge warning">{status ?? "Ready"}</span>
       </header>
 
       <div className="chat-shell">
@@ -161,16 +161,14 @@ export default function ChatPage() {
                   ? `${selectedConversation.spent_tokens} tokens / $${selectedConversation.spent_cost.toFixed(2)}`
                   : "Start a new guarded run."}
               </p>
+              {selectedConversation?.pending_approval && (
+                <p className="chat-inline-status warning">
+                  Waiting for approval: {selectedConversation.pending_approval_reason}
+                </p>
+              )}
             </div>
             <span className="badge">{selectedConversation?.latest_run_status ?? "idle"}</span>
           </div>
-
-          {selectedConversation?.pending_approval && (
-            <div className="approval-banner">
-              <strong>Waiting for approval.</strong>
-              <span>{selectedConversation.pending_approval_reason}</span>
-            </div>
-          )}
 
           <div className="chat-transcript" ref={transcriptRef}>
             {messages.length === 0 && (
@@ -204,7 +202,7 @@ export default function ChatPage() {
               disabled={busy || selectedConversation?.pending_approval}
             />
             <div className="chat-composer-footer">
-              <span className="muted">
+              <span className="chat-composer-status">
                 {selectedConversation?.pending_approval
                   ? "Approve or deny the pending tool call to continue this thread."
                   : "Multi-step runs can chain local and remote MCP tools in one conversation."}
@@ -219,6 +217,6 @@ export default function ChatPage() {
           </form>
         </section>
       </div>
-    </>
+    </div>
   );
 }

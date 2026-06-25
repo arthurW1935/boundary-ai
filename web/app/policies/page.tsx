@@ -46,6 +46,7 @@ export default function PoliciesPage() {
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [form, setForm] = useState(DEFAULT_FORM);
+  const [createOpen, setCreateOpen] = useState(false);
 
   async function loadPolicies() {
     const data = await apiGet<Policy[]>("/api/policies");
@@ -84,6 +85,7 @@ export default function PoliciesPage() {
       setForm(DEFAULT_FORM);
       setStatus("Policy created.");
       await loadPolicies();
+      setCreateOpen(false);
     } catch (error) {
       setStatus(`Policy JSON is invalid or request failed: ${String(error)}`);
     }
@@ -102,7 +104,7 @@ export default function PoliciesPage() {
   }
 
   return (
-    <>
+    <div className="page page-fixed">
       <header className="page-header">
         <div>
           <h2>Policies</h2>
@@ -110,120 +112,167 @@ export default function PoliciesPage() {
             Create deterministic guardrails that apply before any MCP tool runs. These rules are
             the real control point, not the model prompt.
           </p>
+          {status && <p className="page-status">{status}</p>}
         </div>
-        <span className="badge">{status ?? "Live policy plane"}</span>
+        <div className="row wrap">
+          <button className="button secondary" onClick={() => loadPolicies()}>
+            Refresh
+          </button>
+          <button className="button" onClick={() => setCreateOpen(true)}>
+            Create rule
+          </button>
+        </div>
       </header>
 
-      <div className="grid two">
-        <section className="panel">
-          <h3>Create Rule</h3>
-          <div className="row wrap" style={{ marginBottom: 14 }}>
-            <button className="button secondary" onClick={() => setForm(PRESETS.blockDelete)}>
-              Block deletes
-            </button>
-            <button className="button secondary" onClick={() => setForm(PRESETS.approveWrite)}>
-              Approval for writes
-            </button>
-            <button className="button secondary" onClick={() => setForm(PRESETS.restrictNotes)}>
-              Notes path only
-            </button>
-          </div>
-          <form className="stack" onSubmit={createPolicy}>
-            <div className="field">
-              <label>Name</label>
-              <input
-                required
-                value={form.name}
-                onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-                placeholder="Block deletes"
-              />
-            </div>
-            <div className="field">
-              <label>Rule type</label>
-              <select
-                value={form.ruleType}
-                onChange={(event) => setForm((current) => ({ ...current, ruleType: event.target.value }))}
-              >
-                <option value="block_tool">block_tool</option>
-                <option value="require_approval">require_approval</option>
-                <option value="validate_args">validate_args</option>
-                <option value="token_budget">token_budget</option>
-                <option value="cost_budget">cost_budget</option>
-              </select>
-            </div>
-            <div className="field">
-              <label>Target tool</label>
-              <input
-                value={form.targetTool}
-                onChange={(event) =>
-                  setForm((current) => ({ ...current, targetTool: event.target.value }))
-                }
-                placeholder="delete_file"
-              />
-            </div>
-            <div className="field">
-              <label>Priority</label>
-              <input
-                type="number"
-                value={form.priority}
-                onChange={(event) =>
-                  setForm((current) => ({ ...current, priority: Number(event.target.value) }))
-                }
-              />
-            </div>
-            <div className="field">
-              <label>Conditions JSON</label>
-              <textarea
-                value={form.conditions}
-                onChange={(event) =>
-                  setForm((current) => ({ ...current, conditions: event.target.value }))
-                }
-              />
-            </div>
-            <div className="field">
-              <label>Action JSON</label>
-              <textarea
-                value={form.action}
-                onChange={(event) =>
-                  setForm((current) => ({ ...current, action: event.target.value }))
-                }
-              />
-            </div>
-            <button className="button">Create Policy</button>
-          </form>
-        </section>
-
-        <section className="panel stack">
-          <div className="row wrap" style={{ justifyContent: "space-between" }}>
+      <section className="panel stack panel-fill">
+        <div className="row wrap" style={{ justifyContent: "space-between" }}>
+          <div>
             <h3>Active Rules</h3>
-            <button className="button secondary" onClick={() => loadPolicies()}>
-              Refresh
-            </button>
+            <p className="muted">Rules below are live on the running agent.</p>
           </div>
-          <div className="list">
-            {policies.map((policy) => (
-              <div className="card" key={policy.id}>
-                <div className="row wrap" style={{ justifyContent: "space-between" }}>
-                  <strong>{policy.name}</strong>
-                  <span className={`badge ${policy.enabled ? "success" : "danger"}`}>
-                    {policy.enabled ? "enabled" : "disabled"}
-                  </span>
-                </div>
-                <p className="muted">
-                  {policy.rule_type} / target `{policy.target_tool ?? "*"}` / priority{" "}
-                  {policy.priority}
-                </p>
-                <pre>{JSON.stringify({ conditions: policy.conditions, action: policy.action }, null, 2)}</pre>
-                <div className="row wrap" style={{ marginTop: 12 }}>
-                  <button className="button secondary" onClick={() => togglePolicy(policy)}>
-                    {policy.enabled ? "Disable" : "Enable"}
-                  </button>
-                </div>
+          <span className="badge">{policies.length} rules</span>
+        </div>
+        <div className="list policy-list">
+          {policies.length === 0 && (
+            <div className="empty-state">
+              <p>No policies yet.</p>
+              <button className="button" onClick={() => setCreateOpen(true)}>
+                Create the first rule
+              </button>
+            </div>
+          )}
+          {policies.map((policy) => (
+            <div className="card" key={policy.id}>
+              <div className="row wrap" style={{ justifyContent: "space-between" }}>
+                <strong>{policy.name}</strong>
+                <span className={`badge ${policy.enabled ? "success" : "danger"}`}>
+                  {policy.enabled ? "enabled" : "disabled"}
+                </span>
               </div>
-            ))}
-          </div>
-        </section>
-      </div>
-    </>
+              <p className="muted">
+                {policy.rule_type} / target `{policy.target_tool ?? "*"}` / priority{" "}
+                {policy.priority}
+              </p>
+              <pre>{JSON.stringify({ conditions: policy.conditions, action: policy.action }, null, 2)}</pre>
+              <div className="row wrap" style={{ marginTop: 12 }}>
+                <button className="button secondary" onClick={() => togglePolicy(policy)}>
+                  {policy.enabled ? "Disable" : "Enable"}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {createOpen && (
+        <div className="modal-backdrop" onClick={() => setCreateOpen(false)}>
+          <section
+            className="modal panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-rule-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <h3 id="create-rule-title">Create Rule</h3>
+                <p className="muted">Pick a preset or define a custom guardrail.</p>
+              </div>
+              <button className="button secondary" onClick={() => setCreateOpen(false)}>
+                Close
+              </button>
+            </div>
+
+            <div className="row wrap">
+              <button className="button secondary" onClick={() => setForm(PRESETS.blockDelete)}>
+                Block deletes
+              </button>
+              <button className="button secondary" onClick={() => setForm(PRESETS.approveWrite)}>
+                Approval for writes
+              </button>
+              <button className="button secondary" onClick={() => setForm(PRESETS.restrictNotes)}>
+                Notes path only
+              </button>
+            </div>
+
+            <form className="stack" onSubmit={createPolicy}>
+              <div className="field">
+                <label>Name</label>
+                <input
+                  required
+                  value={form.name}
+                  onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder="Block deletes"
+                />
+              </div>
+              <div className="field">
+                <label>Rule type</label>
+                <select
+                  value={form.ruleType}
+                  onChange={(event) => setForm((current) => ({ ...current, ruleType: event.target.value }))}
+                >
+                  <option value="block_tool">block_tool</option>
+                  <option value="require_approval">require_approval</option>
+                  <option value="validate_args">validate_args</option>
+                  <option value="token_budget">token_budget</option>
+                  <option value="cost_budget">cost_budget</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>Target tool</label>
+                <input
+                  value={form.targetTool}
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, targetTool: event.target.value }))
+                  }
+                  placeholder="delete_file"
+                />
+              </div>
+              <div className="field">
+                <label>Priority</label>
+                <input
+                  type="number"
+                  value={form.priority}
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, priority: Number(event.target.value) }))
+                  }
+                />
+              </div>
+              <div className="field">
+                <label>Conditions JSON</label>
+                <textarea
+                  value={form.conditions}
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, conditions: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="field">
+                <label>Action JSON</label>
+                <textarea
+                  value={form.action}
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, action: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="row wrap" style={{ justifyContent: "flex-end" }}>
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={() => {
+                    setForm(DEFAULT_FORM);
+                    setCreateOpen(false);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button className="button">Create Policy</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+    </div>
   );
 }
