@@ -15,7 +15,7 @@ from armoriq_api.mcp_manager import MCPManager
 from armoriq_api.models import ApprovalRequest, Conversation, MCPServer, Message, Policy, Run
 from armoriq_api.policy import PolicyEngine
 from armoriq_api.schemas import ChatResponse
-from armoriq_api.types import ExecutedToolStep, ToolCall, ToolExecutionIntent
+from armoriq_api.types import ExecutedToolStep, PlannerMessage, ToolCall, ToolExecutionIntent
 
 
 class AgentRuntime:
@@ -186,8 +186,9 @@ class AgentRuntime:
         executed_steps: list[ExecutedToolStep],
     ) -> ChatResponse:
         for _ in range(self.settings.max_tool_steps):
+            conversation_history = await self._get_conversation_history(session, conversation.id)
             try:
-                plan = await self.planner.plan(user_message, tools, executed_steps)
+                plan = await self.planner.plan(user_message, tools, executed_steps, conversation_history)
             except Exception as exc:  # noqa: BLE001
                 run.status = "failed"
                 run.latest_response = str(exc)
@@ -431,6 +432,25 @@ class AgentRuntime:
         session.add(conversation)
         await session.flush()
         return conversation
+
+    async def _get_conversation_history(
+        self,
+        session: AsyncSession,
+        conversation_id: str,
+        limit: int = 12,
+    ) -> list[PlannerMessage]:
+        rows = (
+            await session.scalars(
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.created_at.desc())
+                .limit(limit)
+            )
+        ).all()
+        return [
+            PlannerMessage(role=message.role, content=message.content)
+            for message in reversed(rows)
+        ]
 
     def _serialize_tool_call(self, tool_call: ToolCall) -> dict[str, Any]:
         return {

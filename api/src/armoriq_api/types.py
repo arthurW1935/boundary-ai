@@ -31,6 +31,12 @@ class PlannerDecision:
 
 
 @dataclass(slots=True)
+class PlannerMessage:
+    role: str
+    content: str
+
+
+@dataclass(slots=True)
 class ToolExecutionIntent:
     conversation_id: str
     run_id: str

@@ -37,26 +37,28 @@ export default function ApprovalsPage() {
   }
 
   return (
-    <>
+    <div className="page page-fixed">
       <header className="page-header">
         <div>
           <h2>Approvals</h2>
-          <p>
-            Sensitive tool intents land here when policy escalates them. Approve or deny them
-            live; the paused run resumes without restarting the backend.
-          </p>
+          {status && <p className="page-status">{status}</p>}
         </div>
-        <span className="badge warning">{status ?? "Watching pending actions"}</span>
+        <span className="badge warning">Queue</span>
       </header>
 
-      <section className="panel stack">
+      <section className="panel stack panel-fill">
         <div className="row wrap" style={{ justifyContent: "space-between" }}>
           <h3>Approval Queue</h3>
           <button className="button secondary" onClick={() => loadApprovals()}>
             Refresh
           </button>
         </div>
-        <div className="list">
+        <div className="list list-scroll">
+          {approvals.length === 0 && (
+            <div className="empty-state">
+              <p>No pending approvals.</p>
+            </div>
+          )}
           {approvals.map((approval) => (
             <div className="card" key={approval.id}>
               <div className="row wrap" style={{ justifyContent: "space-between" }}>
@@ -95,6 +97,6 @@ export default function ApprovalsPage() {
           ))}
         </div>
       </section>
-    </>
+    </div>
   );
 }

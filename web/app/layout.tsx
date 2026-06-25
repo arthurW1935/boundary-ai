@@ -4,8 +4,8 @@ import { DashboardShell } from "@/components/dashboard-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "ArmorIQ Guarded Agent",
-  description: "Guarded AI agent with MCP support, policy controls, and live approvals."
+  title: "Boundary",
+  description: "Guarded AI workspace with MCP support, live approvals, and policy controls."
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

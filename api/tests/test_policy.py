@@ -64,3 +64,13 @@ def test_validate_args_blocks_bad_path() -> None:
     decision = engine.evaluate(make_intent(path="../escape.txt"), [policy])
     assert decision.verdict == "block"
     assert "must start with" in decision.reason
+
+
+def test_tool_scope_matches_human_readable_tool_name() -> None:
+    engine = PolicyEngine()
+    policy = make_policy(target_tool="list files", action_json={"reason": "Privacy"})
+
+    decision = engine.evaluate(make_intent(tool_name="list_files"), [policy])
+
+    assert decision.verdict == "block"
+    assert decision.reason == "Privacy"

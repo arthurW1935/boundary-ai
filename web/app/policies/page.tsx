@@ -104,14 +104,10 @@ export default function PoliciesPage() {
   }
 
   return (
-    <div className="page page-fixed">
+    <div className="page">
       <header className="page-header">
         <div>
           <h2>Policies</h2>
-          <p>
-            Create deterministic guardrails that apply before any MCP tool runs. These rules are
-            the real control point, not the model prompt.
-          </p>
           {status && <p className="page-status">{status}</p>}
         </div>
         <div className="row wrap">
@@ -124,11 +120,10 @@ export default function PoliciesPage() {
         </div>
       </header>
 
-      <section className="panel stack panel-fill">
+      <section className="panel stack">
         <div className="row wrap" style={{ justifyContent: "space-between" }}>
           <div>
             <h3>Active Rules</h3>
-            <p className="muted">Rules below are live on the running agent.</p>
           </div>
           <span className="badge">{policies.length} rules</span>
         </div>
@@ -176,7 +171,6 @@ export default function PoliciesPage() {
             <div className="modal-header">
               <div>
                 <h3 id="create-rule-title">Create Rule</h3>
-                <p className="muted">Pick a preset or define a custom guardrail.</p>
               </div>
               <button className="button secondary" onClick={() => setCreateOpen(false)}>
                 Close

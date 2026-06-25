@@ -5,11 +5,11 @@ import { usePathname } from "next/navigation";
 import { ReactNode } from "react";
 
 const NAV = [
-  { href: "/chat", label: "Agent Chat" },
+  { href: "/chat", label: "Chat" },
   { href: "/policies", label: "Policies" },
   { href: "/approvals", label: "Approvals" },
-  { href: "/logs", label: "Audit Logs" },
-  { href: "/mcp-servers", label: "MCP Servers" }
+  { href: "/logs", label: "Logs" },
+  { href: "/mcp-servers", label: "MCP" }
 ];
 
 export function DashboardShell({ children }: { children: ReactNode }) {
@@ -19,11 +19,8 @@ export function DashboardShell({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <h1>ArmorIQ Guarded Agent</h1>
-          <p>
-            Live MCP discovery, policy enforcement, approvals, and audit trails from one
-            control plane.
-          </p>
+          <h1>Boundary</h1>
+          <span className="brand-mark">Guarded Workspace</span>
         </div>
 
         <nav className="nav">

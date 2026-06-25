@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from armoriq_api.config import Settings
-from armoriq_api.types import ExecutedToolStep, PlannerDecision, ToolCall, ToolDescriptor
+from armoriq_api.types import ExecutedToolStep, PlannerDecision, PlannerMessage, ToolCall, ToolDescriptor
 
 
 class BasePlanner:
@@ -16,6 +16,7 @@ class BasePlanner:
         user_message: str,
         tools: list[ToolDescriptor],
         executed_steps: list[ExecutedToolStep],
+        conversation_history: list[PlannerMessage],
     ) -> PlannerDecision:
         raise NotImplementedError
 
@@ -26,9 +27,13 @@ class MockPlanner(BasePlanner):
         user_message: str,
         tools: list[ToolDescriptor],
         executed_steps: list[ExecutedToolStep],
+        conversation_history: list[PlannerMessage],
     ) -> PlannerDecision:
         actions = self._parse_actions(user_message, tools)
         if not actions:
+            follow_up = self._answer_follow_up(user_message, conversation_history)
+            if follow_up is not None:
+                return PlannerDecision(assistant_message=follow_up)
             available = ", ".join(f"{tool.server_name}:{tool.name}" for tool in tools) or "no tools discovered"
             return PlannerDecision(
                 assistant_message=(
@@ -49,6 +54,23 @@ class MockPlanner(BasePlanner):
         return PlannerDecision(
             assistant_message="Completed the requested tool actions:\n" + "\n".join(lines)
         )
+
+    def _answer_follow_up(self, user_message: str, conversation_history: list[PlannerMessage]) -> str | None:
+        normalized = user_message.lower().strip()
+        if "why" not in normalized and "blocked" not in normalized and "approval" not in normalized:
+            return None
+
+        for message in reversed(conversation_history):
+            if message.role != "assistant":
+                continue
+            if message.content.startswith("Tool call blocked:"):
+                reason = message.content.split(":", maxsplit=1)[1].strip()
+                return f"Your last tool call was blocked because: {reason}"
+            if message.content.startswith("Tool call requires approval:"):
+                reason = message.content.split(":", maxsplit=1)[1].strip()
+                return f"Your last tool call needs approval because: {reason}"
+
+        return None
 
     def _parse_actions(self, user_message: str, tools: list[ToolDescriptor]) -> list[ToolCall]:
         actions: list[ToolCall] = []
@@ -170,6 +192,7 @@ class OpenAICompatPlanner(BasePlanner):
         user_message: str,
         tools: list[ToolDescriptor],
         executed_steps: list[ExecutedToolStep],
+        conversation_history: list[PlannerMessage],
     ) -> PlannerDecision:
         tool_aliases = self._build_tool_aliases(tools)
         payload = {
@@ -180,12 +203,13 @@ class OpenAICompatPlanner(BasePlanner):
                     "content": (
                         "You are a guarded MCP agent. You may call tools sequentially when needed. "
                         "Use as many tool calls as necessary, but stop once you can answer clearly. "
-                        "If tool results already answer the question, provide the final answer instead of another tool call."
+                        "If tool results already answer the question, provide the final answer instead of another tool call. "
+                        "When the conversation history already explains a blocked tool call or approval requirement, answer directly and do not claim you lack context."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": self._build_user_prompt(user_message, executed_steps),
+                    "content": self._build_user_prompt(user_message, executed_steps, conversation_history),
                 },
             ],
             "tool_choice": "auto",
@@ -239,22 +263,33 @@ class OpenAICompatPlanner(BasePlanner):
             usage_tokens=usage.get("total_tokens", 0),
         )
 
-    def _build_user_prompt(self, user_message: str, executed_steps: list[ExecutedToolStep]) -> str:
-        if not executed_steps:
-            return user_message
+    def _build_user_prompt(
+        self,
+        user_message: str,
+        executed_steps: list[ExecutedToolStep],
+        conversation_history: list[PlannerMessage],
+    ) -> str:
+        sections: list[str] = []
 
-        step_lines = []
-        for index, step in enumerate(executed_steps, start=1):
-            step_lines.append(
-                f"Step {index}: {step.tool_call.tool_name} with {json.dumps(step.tool_call.arguments)} "
-                f"returned {json.dumps(step.result)}"
-            )
-        return (
-            f"Original user request:\n{user_message}\n\n"
-            "Tool execution history so far:\n"
-            + "\n".join(step_lines)
-            + "\n\nDecide whether another tool call is needed or give the final answer."
-        )
+        if conversation_history:
+            history_lines = [
+                f"{message.role.title()}: {message.content}"
+                for message in conversation_history[-8:]
+            ]
+            sections.append("Recent conversation history:\n" + "\n".join(history_lines))
+
+        if executed_steps:
+            step_lines = []
+            for index, step in enumerate(executed_steps, start=1):
+                step_lines.append(
+                    f"Step {index}: {step.tool_call.tool_name} with {json.dumps(step.tool_call.arguments)} "
+                    f"returned {json.dumps(step.result)}"
+                )
+            sections.append("Tool execution history so far:\n" + "\n".join(step_lines))
+
+        sections.append(f"Current user request:\n{user_message}")
+        sections.append("Decide whether another tool call is needed or give the final answer.")
+        return "\n\n".join(sections)
 
     def _build_tool_aliases(self, tools: list[ToolDescriptor]) -> dict[str, ToolDescriptor]:
         aliases: dict[str, ToolDescriptor] = {}

@@ -2,7 +2,7 @@ import pytest
 
 from armoriq_api.config import Settings
 from armoriq_api.llm import MockPlanner, OpenAICompatPlanner
-from armoriq_api.types import ExecutedToolStep, ToolCall, ToolDescriptor
+from armoriq_api.types import ExecutedToolStep, PlannerMessage, ToolCall, ToolDescriptor
 
 
 def mock_tools() -> list[ToolDescriptor]:
@@ -18,7 +18,7 @@ def mock_tools() -> list[ToolDescriptor]:
 @pytest.mark.anyio
 async def test_mock_planner_understands_natural_delete_phrase() -> None:
     planner = MockPlanner()
-    decision = await planner.plan("now delete the file notes/demo.txt", mock_tools(), [])
+    decision = await planner.plan("now delete the file notes/demo.txt", mock_tools(), [], [])
     assert decision.tool_call is not None
     assert decision.tool_call.tool_name == "delete_file"
     assert decision.tool_call.arguments == {"path": "notes/demo.txt"}
@@ -29,7 +29,7 @@ async def test_mock_planner_advances_through_multiple_actions() -> None:
     planner = MockPlanner()
     prompt = "list files\nwrite file notes/demo.txt: hello\nread file notes/demo.txt"
 
-    first = await planner.plan(prompt, mock_tools(), [])
+    first = await planner.plan(prompt, mock_tools(), [], [])
     assert first.tool_call is not None
     assert first.tool_call.tool_name == "list_files"
 
@@ -37,6 +37,7 @@ async def test_mock_planner_advances_through_multiple_actions() -> None:
         prompt,
         mock_tools(),
         [ExecutedToolStep(ToolCall("server-1", "list_files", {"path": "."}), {"result": []})],
+        [],
     )
     assert second.tool_call is not None
     assert second.tool_call.tool_name == "write_file"
@@ -51,6 +52,7 @@ async def test_mock_planner_advances_through_multiple_actions() -> None:
                 {"path": "notes/demo.txt", "bytes_written": 5},
             ),
         ],
+        [],
     )
     assert third.tool_call is not None
     assert third.tool_call.tool_name == "read_file"
@@ -62,10 +64,25 @@ async def test_mock_planner_can_select_exa_web_search() -> None:
         ToolDescriptor("server-2", "exa", "streamable_http", "web_search_exa", None, None)
     ]
     planner = MockPlanner()
-    decision = await planner.plan("search the web for ArmorIQ", tools, [])
+    decision = await planner.plan("search the web for ArmorIQ", tools, [], [])
     assert decision.tool_call is not None
     assert decision.tool_call.tool_name == "web_search_exa"
     assert decision.tool_call.arguments["query"] == "ArmorIQ"
+
+
+@pytest.mark.anyio
+async def test_mock_planner_explains_previous_block_reason_from_history() -> None:
+    planner = MockPlanner()
+    history = [
+        PlannerMessage(role="user", content="list files"),
+        PlannerMessage(role="assistant", content="Tool call blocked: privacy"),
+        PlannerMessage(role="user", content="why was it blocked?"),
+    ]
+
+    decision = await planner.plan("why was it blocked?", mock_tools(), [], history)
+
+    assert decision.tool_call is None
+    assert decision.assistant_message == "Your last tool call was blocked because: privacy"
 
 
 def test_openai_planner_builds_safe_unique_tool_aliases() -> None:

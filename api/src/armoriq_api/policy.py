@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -130,7 +131,7 @@ class PolicyEngine:
         )
 
     def _matches_scope(self, policy: Policy, intent: ToolExecutionIntent) -> bool:
-        if policy.target_tool and policy.target_tool != intent.tool_name:
+        if policy.target_tool and self._normalize_tool_name(policy.target_tool) != self._normalize_tool_name(intent.tool_name):
             return False
         if policy.target_server_id and policy.target_server_id != intent.server_id:
             return False
@@ -159,3 +160,7 @@ class PolicyEngine:
                 return False, f"Argument '{arg_name}' contains a blocked value."
 
         return True, "Arguments validated."
+
+    def _normalize_tool_name(self, value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
+        return normalized.strip("_")
