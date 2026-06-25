@@ -24,7 +24,6 @@ mcp_server/.venv/
 web/.turbo/
 web/build-output/
 tmp/
-logs/
 mcp_server/sandbox/*
 !mcp_server/sandbox/.gitkeep
 *.egg-info/
